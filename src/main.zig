@@ -1748,6 +1748,19 @@ fn runSignalChannel(allocator: std.mem.Allocator, args: []const []const u8, conf
     subagent_manager.task_runner = yc.subagent_runner.runTaskWithTools;
     defer subagent_manager.deinit();
 
+    // Create optional memory backend (don't fail if unavailable).
+    var mem_rt = yc.memory.initRuntime(allocator, &config.memory, config.workspace_dir);
+    defer if (mem_rt) |*rt| rt.deinit();
+    const mem_opt: ?yc.memory.Memory = if (mem_rt) |rt| rt.memory else null;
+
+    const bootstrap_provider: ?yc.bootstrap.BootstrapProvider = yc.bootstrap.createProvider(
+        allocator,
+        config.memory.backend,
+        mem_opt,
+        config.workspace_dir,
+    ) catch null;
+    defer if (bootstrap_provider) |bp| bp.deinit();
+
     // Create tools (for system prompt and tool calling)
     const tools = yc.tools.allTools(allocator, config.workspace_dir, .{
         .http_enabled = config.http_request.enabled,
@@ -1766,17 +1779,14 @@ fn runSignalChannel(allocator: std.mem.Allocator, args: []const []const u8, conf
         .allowed_paths = config.autonomy.allowed_paths,
         .policy = &sec_policy,
         .subagent_manager = &subagent_manager,
+        .bootstrap_provider = bootstrap_provider,
+        .backend_name = config.memory.backend,
     }) catch &.{};
     defer if (tools.len > 0) yc.tools.deinitTools(allocator, tools);
 
     if (mcp_tools) |mt| {
         std.debug.print("  MCP tools: {d}\n", .{mt.len});
     }
-
-    // Create optional memory backend (don't fail if unavailable)
-    var mem_rt = yc.memory.initRuntime(allocator, &config.memory, config.workspace_dir);
-    defer if (mem_rt) |*rt| rt.deinit();
-    const mem_opt: ?yc.memory.Memory = if (mem_rt) |rt| rt.memory else null;
 
     // Wire MemoryRuntime into tools for retrieval pipeline + vector sync
     if (mem_rt) |*rt| {
@@ -2058,6 +2068,19 @@ fn runTelegramChannel(allocator: std.mem.Allocator, args: []const []const u8, co
     subagent_manager.task_runner = yc.subagent_runner.runTaskWithTools;
     defer subagent_manager.deinit();
 
+    // Create optional memory backend (don't fail if unavailable).
+    var mem_rt = yc.memory.initRuntime(allocator, &config.memory, config.workspace_dir);
+    defer if (mem_rt) |*rt| rt.deinit();
+    const mem_opt: ?yc.memory.Memory = if (mem_rt) |rt| rt.memory else null;
+
+    const bootstrap_provider: ?yc.bootstrap.BootstrapProvider = yc.bootstrap.createProvider(
+        allocator,
+        config.memory.backend,
+        mem_opt,
+        config.workspace_dir,
+    ) catch null;
+    defer if (bootstrap_provider) |bp| bp.deinit();
+
     // Create tools (for system prompt and tool calling)
     const tools = yc.tools.allTools(allocator, config.workspace_dir, .{
         .http_enabled = config.http_request.enabled,
@@ -2076,17 +2099,14 @@ fn runTelegramChannel(allocator: std.mem.Allocator, args: []const []const u8, co
         .allowed_paths = config.autonomy.allowed_paths,
         .policy = &sec_policy,
         .subagent_manager = &subagent_manager,
+        .bootstrap_provider = bootstrap_provider,
+        .backend_name = config.memory.backend,
     }) catch &.{};
     defer if (tools.len > 0) yc.tools.deinitTools(allocator, tools);
 
     if (mcp_tools) |mt| {
         std.debug.print("  MCP tools: {d}\n", .{mt.len});
     }
-
-    // Create optional memory backend (don't fail if unavailable)
-    var mem_rt = yc.memory.initRuntime(allocator, &config.memory, config.workspace_dir);
-    defer if (mem_rt) |*rt| rt.deinit();
-    const mem_opt: ?yc.memory.Memory = if (mem_rt) |rt| rt.memory else null;
 
     // Wire MemoryRuntime into tools for retrieval pipeline + vector sync
     if (mem_rt) |*rt| {

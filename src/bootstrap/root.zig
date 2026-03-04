@@ -8,17 +8,12 @@ pub const MemoryBootstrapProvider = @import("memory_provider.zig").MemoryBootstr
 pub const NullBootstrapProvider = @import("null_provider.zig").NullBootstrapProvider;
 pub const isBootstrapFilename = @import("provider.zig").isBootstrapFilename;
 
-/// Backend names that use file-based bootstrap storage.
-const file_backends = [_][]const u8{ "hybrid", "markdown" };
 /// Backend names that use null (no-op) bootstrap storage.
 const null_backends = [_][]const u8{ "none", "memory" };
 
 /// Returns true if the given backend stores bootstrap files on disk.
 pub fn backendUsesFiles(backend: []const u8) bool {
-    for (&file_backends) |name| {
-        if (std.mem.eql(u8, name, backend)) return true;
-    }
-    return false;
+    return memory_root.usesWorkspaceBootstrapFiles(backend);
 }
 
 /// Factory: create the appropriate BootstrapProvider for a backend.
@@ -29,14 +24,12 @@ pub fn createProvider(
     workspace_dir: ?[]const u8,
 ) !BootstrapProvider {
     // File-based backends
-    for (&file_backends) |name| {
-        if (std.mem.eql(u8, name, backend)) {
-            const ws = workspace_dir orelse return error.WorkspaceDirRequired;
-            const impl = try allocator.create(FileBootstrapProvider);
-            impl.* = FileBootstrapProvider.init(allocator, ws);
-            impl.owns_self = true;
-            return impl.provider();
-        }
+    if (backendUsesFiles(backend)) {
+        const ws = workspace_dir orelse return error.WorkspaceDirRequired;
+        const impl = try allocator.create(FileBootstrapProvider);
+        impl.* = FileBootstrapProvider.init(allocator, ws);
+        impl.owns_self = true;
+        return impl.provider();
     }
     // Null backends
     for (&null_backends) |name| {

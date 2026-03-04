@@ -17,6 +17,7 @@ const cron = @import("cron.zig");
 const builtin = @import("builtin");
 const bootstrap_mod = @import("bootstrap/root.zig");
 const BootstrapProvider = bootstrap_mod.BootstrapProvider;
+const memory_root = @import("memory/root.zig");
 
 /// Staleness thresholds (seconds).
 const DAEMON_STALE_SECONDS: i64 = 30;
@@ -320,10 +321,17 @@ pub fn checkWorkspace(
     }
 
     // Key workspace files — use bootstrap provider when available.
+    var mem_rt: ?memory_root.MemoryRuntime = null;
+    if (!memory_root.usesWorkspaceBootstrapFiles(config.memory.backend)) {
+        mem_rt = memory_root.initRuntime(allocator, &config.memory, config.workspace_dir);
+    }
+    defer if (mem_rt) |*rt| rt.deinit();
+    const mem_opt: ?memory_root.Memory = if (mem_rt) |rt| rt.memory else null;
+
     const bp: ?BootstrapProvider = bootstrap_mod.createProvider(
         allocator,
         config.memory.backend,
-        null,
+        mem_opt,
         config.workspace_dir,
     ) catch null;
     defer if (bp) |p| p.deinit();

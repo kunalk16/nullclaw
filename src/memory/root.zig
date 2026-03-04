@@ -275,7 +275,7 @@ pub fn promptBootstrapMemoryKey(filename: []const u8) ?[]const u8 {
     return null;
 }
 
-/// markdown backend keeps bootstrap identity in workspace files;
+/// markdown and hybrid backends keep bootstrap identity in workspace files;
 /// all other backends use backend-native key/value entries.
 pub fn usesWorkspaceBootstrapFiles(memory_backend: ?[]const u8) bool {
     const backend = memory_backend orelse return true;
