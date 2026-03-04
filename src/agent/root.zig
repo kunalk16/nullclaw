@@ -464,12 +464,32 @@ pub const Agent = struct {
         return (total_chars + structural_chars + 3) / 4;
     }
 
+    fn estimateToolSpecsTokens(tool_specs: []const ToolSpec) u64 {
+        var total_chars: u64 = 0;
+        for (tool_specs) |spec| {
+            total_chars +|= spec.name.len;
+            total_chars +|= spec.description.len;
+            total_chars +|= spec.parameters_json.len;
+        }
+
+        const structural_chars: u64 = @as(u64, @intCast(tool_specs.len)) * 48;
+        return (total_chars + structural_chars + 3) / 4;
+    }
+
     /// Clamp completion tokens to fit within the configured context budget.
     /// Keeps a safety headroom to reduce ContextLengthExceeded errors on strict providers.
-    fn effectiveMaxTokensForMessages(self: *const Agent, messages: []const ChatMessage) u32 {
+    fn effectiveMaxTokensForMessages(
+        self: *const Agent,
+        messages: []const ChatMessage,
+        include_tool_specs: bool,
+    ) u32 {
         if (self.token_limit == 0) return self.max_tokens;
 
-        const prompt_estimate = estimatePromptTokens(messages);
+        var prompt_estimate = estimatePromptTokens(messages);
+        if (include_tool_specs) {
+            prompt_estimate +|= estimateToolSpecsTokens(self.tool_specs);
+        }
+
         if (prompt_estimate >= self.token_limit) return 1;
 
         const available = self.token_limit - prompt_estimate;
@@ -871,11 +891,11 @@ pub const Agent = struct {
 
             // Build messages slice for provider (arena-owned; freed at end of iteration)
             const messages = try self.buildProviderMessages(arena);
-            const request_max_tokens = self.effectiveMaxTokensForMessages(messages);
 
             const timer_start = std.time.milliTimestamp();
             const is_streaming = self.stream_callback != null and self.stream_ctx != null and self.provider.supportsStreaming();
             const native_tools_enabled = !is_streaming and self.provider.supportsNativeTools();
+            const request_max_tokens = self.effectiveMaxTokensForMessages(messages, native_tools_enabled);
 
             // Call provider: streaming (no retries, no native tools) or blocking with retry
             var response: ChatResponse = undefined;
@@ -951,7 +971,7 @@ pub const Agent = struct {
                     {
                         self.context_was_compacted = true;
                         const recovery_msgs = self.buildProviderMessages(arena) catch |prep_err| return prep_err;
-                        const recovery_max_tokens = self.effectiveMaxTokensForMessages(recovery_msgs);
+                        const recovery_max_tokens = self.effectiveMaxTokensForMessages(recovery_msgs, native_tools_enabled);
                         response_attempt = 2;
                         self.logLlmRequest(iteration + 1, 2, recovery_msgs, native_tools_enabled, false);
                         break :retry_blk self.provider.chat(
@@ -996,7 +1016,7 @@ pub const Agent = struct {
                         if (self.history.items.len > compaction.CONTEXT_RECOVERY_MIN_HISTORY and self.forceCompressHistory()) {
                             self.context_was_compacted = true;
                             const recovery_msgs = self.buildProviderMessages(arena) catch |prep_err| return prep_err;
-                            const recovery_max_tokens = self.effectiveMaxTokensForMessages(recovery_msgs);
+                            const recovery_max_tokens = self.effectiveMaxTokensForMessages(recovery_msgs, native_tools_enabled);
                             response_attempt = 3;
                             self.logLlmRequest(iteration + 1, 3, recovery_msgs, native_tools_enabled, false);
                             break :retry_blk self.provider.chat(
@@ -1330,7 +1350,7 @@ pub const Agent = struct {
             return fallback;
         };
         defer self.allocator.free(summary_messages);
-        const summary_max_tokens = self.effectiveMaxTokensForMessages(summary_messages);
+        const summary_max_tokens = self.effectiveMaxTokensForMessages(summary_messages, false);
 
         self.logLlmRequest(self.max_tool_iterations + 1, 1, summary_messages, false, false);
         var summary_response = self.provider.chat(
@@ -2627,7 +2647,7 @@ test "Agent effective max_tokens reserves prompt headroom" {
         .{ .role = .system, .content = large_system },
         .{ .role = .user, .content = "how are you?" },
     };
-    const capped = agent.effectiveMaxTokensForMessages(&messages);
+    const capped = agent.effectiveMaxTokensForMessages(&messages, false);
     try std.testing.expect(capped < agent.max_tokens);
     try std.testing.expect(capped > 0);
 }
@@ -2672,7 +2692,7 @@ test "Agent effective max_tokens does not double count plain content with conten
         },
     };
 
-    const capped = agent.effectiveMaxTokensForMessages(&messages);
+    const capped = agent.effectiveMaxTokensForMessages(&messages, false);
     try std.testing.expect(capped > 1);
 }
 
@@ -2733,9 +2753,61 @@ test "Agent effective max_tokens scales with image_base64 size" {
         },
     };
 
-    const capped_small = agent.effectiveMaxTokensForMessages(&small_messages);
-    const capped_large = agent.effectiveMaxTokensForMessages(&large_messages);
+    const capped_small = agent.effectiveMaxTokensForMessages(&small_messages, false);
+    const capped_large = agent.effectiveMaxTokensForMessages(&large_messages, false);
     try std.testing.expect(capped_large < capped_small);
+}
+
+test "Agent effective max_tokens accounts for native tool schema overhead" {
+    const allocator = std.testing.allocator;
+
+    var noop = observability.NoopObserver{};
+    const tool_specs = try allocator.alloc(ToolSpec, 2);
+
+    var params_a: [2_000]u8 = undefined;
+    @memset(params_a[0..], 'a');
+    var params_b: [2_000]u8 = undefined;
+    @memset(params_b[0..], 'b');
+
+    tool_specs[0] = .{
+        .name = "file_write",
+        .description = "Write file content",
+        .parameters_json = params_a[0..],
+    };
+    tool_specs[1] = .{
+        .name = "file_edit",
+        .description = "Edit file content",
+        .parameters_json = params_b[0..],
+    };
+
+    var agent = Agent{
+        .allocator = allocator,
+        .provider = undefined,
+        .tools = &.{},
+        .tool_specs = tool_specs,
+        .mem = null,
+        .observer = noop.observer(),
+        .model_name = "openai/gpt-4",
+        .temperature = 0.7,
+        .workspace_dir = "/tmp",
+        .max_tool_iterations = 10,
+        .max_history_messages = 50,
+        .auto_save = false,
+        .token_limit = 2_000,
+        .max_tokens = 1_000,
+        .history = .empty,
+        .total_tokens = 0,
+        .has_system_prompt = false,
+    };
+    defer agent.deinit();
+
+    const messages = [_]ChatMessage{
+        .{ .role = .user, .content = "hello" },
+    };
+
+    const without_tools = agent.effectiveMaxTokensForMessages(&messages, false);
+    const with_tools = agent.effectiveMaxTokensForMessages(&messages, true);
+    try std.testing.expect(with_tools < without_tools);
 }
 
 test "Agent.fromConfig keeps explicit max_tokens override" {
