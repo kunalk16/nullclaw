@@ -589,10 +589,15 @@ pub const Agent = struct {
 
     fn selectDisplayText(response_text: []const u8, parsed_text: []const u8, parsed_calls_len: usize) []const u8 {
         if (parsed_calls_len > 0) return parsed_text;
-        if (parsed_text.len > 0) return parsed_text;
+        if (parsed_text.len > 0) {
+            // Some malformed/unclosed tool-call payloads can survive into parsed_text
+            // via parser recovery fallbacks. Suppress them from user-visible output.
+            if (dispatcher.containsToolCallMarkup(parsed_text)) return "";
+            return parsed_text;
+        }
         // If tool-call markup exists but parsing produced no valid calls/text,
         // never show the raw payload to the user.
-        if (dispatcher.containsToolCallMarkup(response_text)) return parsed_text;
+        if (dispatcher.containsToolCallMarkup(response_text)) return "";
         return response_text;
     }
 
@@ -4795,6 +4800,12 @@ test "Agent selectDisplayText keeps plain text when no markup exists" {
 test "Agent selectDisplayText prefers parsed text when present" {
     const selected = Agent.selectDisplayText("<tool_call>{}</tool_call>", "let me check", 1);
     try std.testing.expectEqualStrings("let me check", selected);
+}
+
+test "Agent selectDisplayText hides malformed tool markup present in parsed text" {
+    const parsed_with_markup = "Some text <tool_call>{\"name\":\"shell\"";
+    const selected = Agent.selectDisplayText(parsed_with_markup, parsed_with_markup, 0);
+    try std.testing.expectEqualStrings("", selected);
 }
 
 test "Agent.fromConfig sets exec_security=full for full autonomy" {
