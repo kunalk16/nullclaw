@@ -50,8 +50,8 @@ fn applyAutonomySelection(cfg: *Config, autonomy: []const u8) AutonomySelectionE
         cfg.autonomy.block_high_risk_commands = false;
         return;
     }
-    if (std.mem.eql(u8, autonomy, "godmode")) {
-        cfg.autonomy.level = .godmode;
+    if (std.mem.eql(u8, autonomy, "yolo")) {
+        cfg.autonomy.level = .yolo;
         cfg.autonomy.require_approval_for_medium_risk = false;
         cfg.autonomy.block_high_risk_commands = false;
         return;

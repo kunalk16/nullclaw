@@ -398,7 +398,7 @@ pub const Agent = struct {
             .temperature = cfg.default_temperature,
             .workspace_dir = cfg.workspace_dir,
             .allowed_paths = cfg.autonomy.allowed_paths,
-            .multimodal_unrestricted = cfg.autonomy.level == .godmode,
+            .multimodal_unrestricted = cfg.autonomy.level == .yolo,
             .max_tool_iterations = cfg.agent.max_tool_iterations,
             .max_history_messages = cfg.agent.max_history_messages,
             .auto_save = cfg.memory.auto_save,
@@ -416,12 +416,12 @@ pub const Agent = struct {
             .compaction_max_source_chars = cfg.agent.compaction_max_source_chars,
             .tool_filter_groups = cfg.agent.tool_filter_groups,
             .exec_security = switch (cfg.autonomy.level) {
-                .full, .godmode => .full,
+                .full, .yolo => .full,
                 .read_only => .deny,
                 .supervised => .allowlist,
             },
             .exec_ask = switch (cfg.autonomy.level) {
-                .full, .read_only, .godmode => .off,
+                .full, .read_only, .yolo => .off,
                 .supervised => .on_miss,
             },
             .history = .empty,
@@ -5204,7 +5204,7 @@ test "Agent.fromConfig sets exec_security=allowlist for supervised autonomy" {
     try std.testing.expect(agent.exec_ask == .on_miss);
 }
 
-test "Agent.fromConfig sets multimodal_unrestricted for godmode" {
+test "Agent.fromConfig sets multimodal_unrestricted for yolo" {
     const allocator = std.testing.allocator;
     var cfg = Config{
         .workspace_dir = "/tmp/yc",
@@ -5212,7 +5212,7 @@ test "Agent.fromConfig sets multimodal_unrestricted for godmode" {
         .default_model = "openai/gpt-4.1-mini",
         .allocator = allocator,
     };
-    cfg.autonomy.level = .godmode;
+    cfg.autonomy.level = .yolo;
 
     var noop = observability.NoopObserver{};
     var agent = try Agent.fromConfig(allocator, &cfg, undefined, &.{}, null, noop.observer());

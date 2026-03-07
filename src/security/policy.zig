@@ -9,8 +9,8 @@ pub const AutonomyLevel = enum {
     supervised,
     /// Full: autonomous execution within policy bounds
     full,
-    /// Godmode: bypasses all security checks (allowlist, syntax, risk, approval, rate limiting)
-    godmode,
+    /// YOLO: bypasses all security checks (allowlist, syntax, risk, approval, rate limiting)
+    yolo,
 
     pub fn default() AutonomyLevel {
         return .supervised;
@@ -21,7 +21,7 @@ pub const AutonomyLevel = enum {
             .read_only => "readonly",
             .supervised => "supervised",
             .full => "full",
-            .godmode => "godmode",
+            .yolo => "yolo",
         };
     }
 
@@ -29,7 +29,7 @@ pub const AutonomyLevel = enum {
         if (std.mem.eql(u8, s, "readonly") or std.mem.eql(u8, s, "read_only")) return .read_only;
         if (std.mem.eql(u8, s, "supervised")) return .supervised;
         if (std.mem.eql(u8, s, "full")) return .full;
-        if (std.mem.eql(u8, s, "godmode")) return .godmode;
+        if (std.mem.eql(u8, s, "yolo")) return .yolo;
         return null;
     }
 };
@@ -149,7 +149,7 @@ pub const SecurityPolicy = struct {
         command: []const u8,
         approved: bool,
     ) error{ CommandNotAllowed, HighRiskBlocked, ApprovalRequired }!CommandRiskLevel {
-        if (self.autonomy == .godmode) return .low;
+        if (self.autonomy == .yolo) return .low;
         if (!self.isCommandAllowed(command)) {
             return error.CommandNotAllowed;
         }
@@ -178,7 +178,7 @@ pub const SecurityPolicy = struct {
 
     /// Check if a shell command is allowed.
     pub fn isCommandAllowed(self: *const SecurityPolicy, command: []const u8) bool {
-        if (self.autonomy == .godmode) return true;
+        if (self.autonomy == .yolo) return true;
         if (self.autonomy == .read_only) return false;
 
         // Reject oversized commands — never silently truncate
@@ -269,7 +269,7 @@ pub const SecurityPolicy = struct {
     /// Record an action and check if the rate limit has been exceeded.
     /// Returns true if the action is allowed, false if rate-limited.
     pub fn recordAction(self: *const SecurityPolicy) !bool {
-        if (self.autonomy == .godmode) return true;
+        if (self.autonomy == .yolo) return true;
         if (self.tracker) |tracker| {
             return tracker.recordAction();
         }
@@ -278,7 +278,7 @@ pub const SecurityPolicy = struct {
 
     /// Check if the rate limit would be exceeded without recording.
     pub fn isRateLimited(self: *const SecurityPolicy) bool {
-        if (self.autonomy == .godmode) return false;
+        if (self.autonomy == .yolo) return false;
         if (self.tracker) |tracker| {
             return tracker.isLimited();
         }
@@ -1593,19 +1593,19 @@ test "full autonomy wildcard: arbitrary commands allowed" {
     try std.testing.expect(p.isCommandAllowed("zig build test"));
 }
 
-// ── Godmode autonomy level tests ────────────────────────────────
+// ── YOLO autonomy level tests ───────────────────────────────────
 
-test "godmode fromString returns godmode" {
-    try std.testing.expectEqual(AutonomyLevel.godmode, AutonomyLevel.fromString("godmode").?);
+test "yolo fromString returns yolo" {
+    try std.testing.expectEqual(AutonomyLevel.yolo, AutonomyLevel.fromString("yolo").?);
 }
 
-test "godmode toString returns godmode" {
-    try std.testing.expectEqualStrings("godmode", AutonomyLevel.godmode.toString());
+test "yolo toString returns yolo" {
+    try std.testing.expectEqualStrings("yolo", AutonomyLevel.yolo.toString());
 }
 
-test "godmode isCommandAllowed bypasses all syntax checks" {
-    const p = SecurityPolicy{ .autonomy = .godmode };
-    // Subshell expansion — blocked by full, allowed by godmode
+test "yolo isCommandAllowed bypasses all syntax checks" {
+    const p = SecurityPolicy{ .autonomy = .yolo };
+    // Subshell expansion — blocked by full, allowed by yolo
     try std.testing.expect(p.isCommandAllowed("echo $(whoami)"));
     // Backtick expansion
     try std.testing.expect(p.isCommandAllowed("echo `id`"));
@@ -1617,26 +1617,26 @@ test "godmode isCommandAllowed bypasses all syntax checks" {
     try std.testing.expect(p.isCommandAllowed("diff <(ls) <(ls /tmp)"));
 }
 
-test "godmode validateCommandExecution returns low for all commands" {
-    const p = SecurityPolicy{ .autonomy = .godmode };
-    // High-risk command — godmode bypasses entirely
+test "yolo validateCommandExecution returns low for all commands" {
+    const p = SecurityPolicy{ .autonomy = .yolo };
+    // High-risk command — yolo bypasses entirely
     const risk1 = try p.validateCommandExecution("sudo rm -rf /", false);
     try std.testing.expectEqual(CommandRiskLevel.low, risk1);
-    // Command not on any allowlist — godmode bypasses
+    // Command not on any allowlist — yolo bypasses
     const risk2 = try p.validateCommandExecution("python3 exploit.py", false);
     try std.testing.expectEqual(CommandRiskLevel.low, risk2);
 }
 
-test "godmode canAct returns true" {
-    const p = SecurityPolicy{ .autonomy = .godmode };
+test "yolo canAct returns true" {
+    const p = SecurityPolicy{ .autonomy = .yolo };
     try std.testing.expect(p.canAct());
 }
 
-test "godmode recordAction bypasses rate limiting" {
+test "yolo recordAction bypasses rate limiting" {
     var tracker = RateTracker.init(std.testing.allocator, 1);
     defer tracker.deinit();
     var p = SecurityPolicy{
-        .autonomy = .godmode,
+        .autonomy = .yolo,
         .tracker = &tracker,
     };
     try std.testing.expect(try p.recordAction());
@@ -1644,11 +1644,11 @@ test "godmode recordAction bypasses rate limiting" {
     try std.testing.expect(try p.recordAction());
 }
 
-test "godmode isRateLimited always false" {
+test "yolo isRateLimited always false" {
     var tracker = RateTracker.init(std.testing.allocator, 1);
     defer tracker.deinit();
     var p = SecurityPolicy{
-        .autonomy = .godmode,
+        .autonomy = .yolo,
         .tracker = &tracker,
     };
     _ = try tracker.recordAction();

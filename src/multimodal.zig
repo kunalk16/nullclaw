@@ -28,7 +28,7 @@ pub const MultimodalConfig = struct {
     /// Directories from which local image reads are allowed.
     /// If empty, all local file reads are rejected (only URLs pass through).
     allowed_dirs: []const []const u8 = &.{},
-    /// When true, skip the allowed_dirs check entirely (godmode).
+    /// When true, skip the allowed_dirs check entirely (yolo mode).
     /// File size and MIME validation still apply.
     skip_dir_check: bool = false,
 };
@@ -169,7 +169,7 @@ pub fn readLocalImage(allocator: std.mem.Allocator, path: []const u8, config: Mu
     };
     defer allocator.free(resolved);
 
-    // Verify the resolved path is within an allowed directory (skipped in godmode).
+    // Verify the resolved path is within an allowed directory (skipped in yolo mode).
     if (!config.skip_dir_check) {
         if (config.allowed_dirs.len == 0) return error.LocalReadNotAllowed;
         const allowed = blk: {
