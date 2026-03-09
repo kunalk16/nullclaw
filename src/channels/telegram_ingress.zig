@@ -164,13 +164,16 @@ pub fn cancelPendingTextChainForKey(
 
 fn findNextMergeCandidateIndex(messages: []const root.ChannelMessage, start: usize) ?usize {
     const current = messages[start];
+    const current_message_id = current.message_id orelse return null;
     for (start + 1..messages.len) |idx| {
         const next = messages[idx];
         if (!sameChat(current, next)) continue;
         if (!sameSenderAndChat(current, next)) break;
-        if (!hasMessageId(next)) break;
+        const next_message_id = next.message_id orelse break;
         if (isSlashCommandMessage(next.content)) break;
-        return idx;
+        const split_like = isLikelySplitTextChunk(current) or isLikelySplitTextChunk(next);
+        if (next_message_id == current_message_id + 1 or split_like) return idx;
+        break;
     }
     return null;
 }
@@ -453,7 +456,7 @@ test "telegram ingress shouldDebounceTextMessage debounces medium chunk (~900 by
     try std.testing.expect(shouldDebounceTextMessage(now, pending_messages.items, received_at.items, msg));
 }
 
-test "telegram ingress mergeConsecutiveMessages merges non-consecutive ids for same sender/chat" {
+test "telegram ingress mergeConsecutiveMessages does not merge short non-consecutive ids" {
     const alloc = std.testing.allocator;
     var messages: std.ArrayListUnmanaged(root.ChannelMessage) = .empty;
     defer deinitOwnedTestMessages(alloc, &messages);
@@ -463,8 +466,34 @@ test "telegram ingress mergeConsecutiveMessages merges non-consecutive ids for s
 
     mergeConsecutiveMessages(alloc, &messages);
 
+    try std.testing.expectEqual(@as(usize, 2), messages.items.len);
+    try std.testing.expectEqualStrings("First", messages.items[0].content);
+    try std.testing.expectEqualStrings("Second", messages.items[1].content);
+}
+
+test "telegram ingress mergeConsecutiveMessages merges split-like non-consecutive ids" {
+    const alloc = std.testing.allocator;
+    var messages: std.ArrayListUnmanaged(root.ChannelMessage) = .empty;
+    defer deinitOwnedTestMessages(alloc, &messages);
+
+    const split_like = try alloc.alloc(u8, TEXT_SPLIT_LIKELY_MIN_LEN);
+    @memset(split_like, 'x');
+
+    try messages.append(alloc, .{
+        .id = try alloc.dupe(u8, "user1"),
+        .sender = try alloc.dupe(u8, "chat1"),
+        .content = split_like,
+        .channel = "telegram",
+        .timestamp = 0,
+        .message_id = 10,
+    });
+    try appendOwnedTestMessage(alloc, &messages, "user1", "chat1", "tail", 15);
+
+    mergeConsecutiveMessages(alloc, &messages);
+
     try std.testing.expectEqual(@as(usize, 1), messages.items.len);
-    try std.testing.expectEqualStrings("First\nSecond", messages.items[0].content);
+    try std.testing.expect(std.mem.startsWith(u8, messages.items[0].content, "xxxx"));
+    try std.testing.expect(std.mem.endsWith(u8, messages.items[0].content, "\ntail"));
 }
 
 test "telegram ingress mergeConsecutiveMessages allocation failure does not leak" {
