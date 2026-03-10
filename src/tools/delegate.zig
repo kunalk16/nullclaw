@@ -6,12 +6,17 @@ const ToolResult = root.ToolResult;
 const JsonObjectMap = root.JsonObjectMap;
 const Config = @import("../config.zig").Config;
 const NamedAgentConfig = @import("../config.zig").NamedAgentConfig;
+const ProviderEntry = @import("../config_types.zig").ProviderEntry;
+const provider_names = @import("../provider_names.zig");
 const providers = @import("../providers/root.zig");
 
 const TestCompleteFn = *const fn (
     allocator: std.mem.Allocator,
     provider_name: []const u8,
     api_key: ?[]const u8,
+    base_url: ?[]const u8,
+    native_tools: bool,
+    user_agent: ?[]const u8,
     model: []const u8,
     system_prompt: []const u8,
     prompt: []const u8,
@@ -26,6 +31,8 @@ var test_complete_agent_prompt_override: ?TestCompleteFn = null;
 pub const DelegateTool = struct {
     /// Named agent configs from the global config (lookup by name).
     agents: []const NamedAgentConfig = &.{},
+    /// Provider entries from config for API key/base URL/runtime option lookup.
+    configured_providers: []const ProviderEntry = &.{},
     /// Fallback API key if agent-specific key is not set.
     fallback_api_key: ?[]const u8 = null,
     /// Current delegation depth. Incremented for sub-delegates.
@@ -95,12 +102,22 @@ pub const DelegateTool = struct {
 
         // Determine system prompt, API key, provider, model from agent config or defaults
         if (agent_cfg) |ac| {
-            const api_key = ac.api_key orelse self.fallback_api_key;
+            const resolved_provider_api_key = if (ac.api_key == null)
+                try providers.resolveApiKeyFromConfig(allocator, ac.provider, self.configured_providers)
+            else
+                null;
+            defer if (resolved_provider_api_key) |key| allocator.free(key);
+
+            const provider_entry = self.findProviderEntry(ac.provider);
+            const api_key = ac.api_key orelse resolved_provider_api_key orelse self.fallback_api_key;
             const sys_prompt = ac.system_prompt orelse "You are a helpful assistant. Respond concisely.";
             const response = completeAgentPrompt(
                 allocator,
                 ac.provider,
                 api_key,
+                if (provider_entry) |entry| entry.base_url else null,
+                if (provider_entry) |entry| entry.native_tools else true,
+                if (provider_entry) |entry| entry.user_agent else null,
                 ac.model,
                 sys_prompt,
                 full_prompt,
@@ -149,10 +166,20 @@ pub const DelegateTool = struct {
         return null;
     }
 
+    fn findProviderEntry(self: *const DelegateTool, provider_name: []const u8) ?ProviderEntry {
+        for (self.configured_providers) |entry| {
+            if (provider_names.providerNamesMatch(entry.name, provider_name)) return entry;
+        }
+        return null;
+    }
+
     fn completeAgentPrompt(
         allocator: std.mem.Allocator,
         provider_name: []const u8,
         api_key: ?[]const u8,
+        base_url: ?[]const u8,
+        native_tools: bool,
+        user_agent: ?[]const u8,
         model: []const u8,
         system_prompt: []const u8,
         prompt: []const u8,
@@ -160,16 +187,16 @@ pub const DelegateTool = struct {
     ) ![]const u8 {
         if (builtin.is_test) {
             if (test_complete_agent_prompt_override) |override| {
-                return override(allocator, provider_name, api_key, model, system_prompt, prompt, temperature);
+                return override(allocator, provider_name, api_key, base_url, native_tools, user_agent, model, system_prompt, prompt, temperature);
             }
         }
         var provider_holder = providers.ProviderHolder.fromConfig(
             allocator,
             provider_name,
             api_key,
-            null,
-            true,
-            null,
+            base_url,
+            native_tools,
+            user_agent,
         );
         defer provider_holder.deinit();
         return provider_holder.provider().chatWithSystem(
@@ -184,6 +211,10 @@ pub const DelegateTool = struct {
 
 // ── Tests ───────────────────────────────────────────────────────────
 var test_expected_provider_name: ?[]const u8 = null;
+var test_expected_api_key: ?[]const u8 = null;
+var test_expected_base_url: ?[]const u8 = null;
+var test_expected_native_tools: ?bool = null;
+var test_expected_user_agent: ?[]const u8 = null;
 var test_expected_model_name: ?[]const u8 = null;
 var test_expected_system_prompt: ?[]const u8 = null;
 var test_expected_prompt: ?[]const u8 = null;
@@ -192,15 +223,32 @@ fn testCompleteAgentPrompt(
     allocator: std.mem.Allocator,
     provider_name: []const u8,
     api_key: ?[]const u8,
+    base_url: ?[]const u8,
+    native_tools: bool,
+    user_agent: ?[]const u8,
     model: []const u8,
     system_prompt: []const u8,
     prompt: []const u8,
     temperature: f64,
 ) ![]const u8 {
-    _ = api_key;
     try std.testing.expectApproxEqAbs(@as(f64, 0.7), temperature, 0.000001);
     if (test_expected_provider_name) |expected| {
         try std.testing.expectEqualStrings(expected, provider_name);
+    }
+    if (test_expected_api_key) |expected| {
+        try std.testing.expect(api_key != null);
+        try std.testing.expectEqualStrings(expected, api_key.?);
+    }
+    if (test_expected_base_url) |expected| {
+        try std.testing.expect(base_url != null);
+        try std.testing.expectEqualStrings(expected, base_url.?);
+    }
+    if (test_expected_native_tools) |expected| {
+        try std.testing.expectEqual(expected, native_tools);
+    }
+    if (test_expected_user_agent) |expected| {
+        try std.testing.expect(user_agent != null);
+        try std.testing.expectEqualStrings(expected, user_agent.?);
     }
     if (test_expected_model_name) |expected| {
         try std.testing.expectEqualStrings(expected, model);
@@ -491,6 +539,64 @@ test "delegate uses parsed agent model.primary provider ref" {
     try std.testing.expectEqualStrings("mock-model", cfg.agents[0].model);
 
     var dt = DelegateTool{ .agents = cfg.agents };
+    const tool = dt.tool();
+    const parsed = try root.parseTestArgs("{\"agent\":\"coder\",\"prompt\":\"Fix it\"}");
+    defer parsed.deinit();
+
+    const result = try tool.execute(allocator, parsed.value.object);
+    defer if (result.output.len > 0) allocator.free(result.output);
+    defer if (result.error_msg) |e| if (e.len > 0) allocator.free(e);
+
+    try std.testing.expect(result.success);
+    try std.testing.expectEqualStrings("delegate-ok", result.output);
+}
+
+test "delegate uses configured provider entry for key and base_url" {
+    const allocator = std.testing.allocator;
+    test_complete_agent_prompt_override = testCompleteAgentPrompt;
+    defer test_complete_agent_prompt_override = null;
+    test_expected_provider_name = "ollama";
+    test_expected_api_key = "ollama-key";
+    test_expected_base_url = "http://192.168.1.12:11434";
+    test_expected_native_tools = false;
+    test_expected_user_agent = "nullclaw-test";
+    test_expected_model_name = "qwen3.5:cloud";
+    test_expected_system_prompt = "You are a coder.";
+    test_expected_prompt = "Fix it";
+    defer {
+        test_expected_provider_name = null;
+        test_expected_api_key = null;
+        test_expected_base_url = null;
+        test_expected_native_tools = null;
+        test_expected_user_agent = null;
+        test_expected_model_name = null;
+        test_expected_system_prompt = null;
+        test_expected_prompt = null;
+    }
+
+    const agents = [_]NamedAgentConfig{
+        .{
+            .name = "coder",
+            .provider = "ollama",
+            .model = "qwen3.5:cloud",
+            .system_prompt = "You are a coder.",
+        },
+    };
+    const provider_entries = [_]ProviderEntry{
+        .{
+            .name = "ollama",
+            .api_key = "ollama-key",
+            .base_url = "http://192.168.1.12:11434",
+            .native_tools = false,
+            .user_agent = "nullclaw-test",
+        },
+    };
+
+    var dt = DelegateTool{
+        .agents = &agents,
+        .configured_providers = &provider_entries,
+        .fallback_api_key = "default-key",
+    };
     const tool = dt.tool();
     const parsed = try root.parseTestArgs("{\"agent\":\"coder\",\"prompt\":\"Fix it\"}");
     defer parsed.deinit();
