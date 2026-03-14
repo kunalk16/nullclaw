@@ -971,6 +971,9 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
             if (ag.object.get("message_timeout_secs")) |v| {
                 if (v == .integer) self.agent.message_timeout_secs = @intCast(v.integer);
             }
+            if (ag.object.get("timezone")) |v| {
+                if (v == .string) self.agent.timezone = try self.allocator.dupe(u8, v.string);
+            }
             if (ag.object.get("vision_disabled_models")) |v| {
                 if (v == .array) self.agent.vision_disabled_models = try parseStringArray(self.allocator, v.array);
             }

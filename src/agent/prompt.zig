@@ -146,6 +146,7 @@ pub const PromptContext = struct {
     workspace_dir: []const u8,
     model_name: []const u8,
     tools: []const Tool,
+    timezone: []const u8 = "UTC",
     capabilities_section: ?[]const u8 = null,
     conversation_context: ?ConversationContext = null,
     bootstrap_provider: ?BootstrapProvider = null,
@@ -336,7 +337,7 @@ pub fn buildSystemPrompt(
     try std.fmt.format(w, "## Workspace\n\nWorking directory: `{s}`\n\n", .{ctx.workspace_dir});
 
     // DateTime section
-    try appendDateTimeSection(w);
+    try appendDateTimeSection(w, ctx.timezone);
 
     // Runtime section
     try std.fmt.format(w, "## Runtime\n\nOS: {s} | Model: {s}\n\n", .{
@@ -685,10 +686,35 @@ fn appendSkillsSection(
     }
 }
 
-/// Append a human-readable UTC date/time section derived from the system clock.
-fn appendDateTimeSection(w: anytype) !void {
-    const timestamp = std.time.timestamp();
-    const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = @intCast(timestamp) };
+fn parseUtcOffsetSeconds(timezone: []const u8) ?i64 {
+    if (std.ascii.eqlIgnoreCase(timezone, "UTC")) return 0;
+    if (timezone.len != 9) return null;
+    if (!std.ascii.eqlIgnoreCase(timezone[0..3], "UTC")) return null;
+
+    const sign = timezone[3];
+    if (sign != '+' and sign != '-') return null;
+    if (timezone[6] != ':') return null;
+
+    const hours = std.fmt.parseInt(i64, timezone[4..6], 10) catch return null;
+    const minutes = std.fmt.parseInt(i64, timezone[7..9], 10) catch return null;
+    if (hours < 0 or hours > 23) return null;
+    if (minutes < 0 or minutes > 59) return null;
+
+    const total = hours * 3600 + minutes * 60;
+    return if (sign == '-') -total else total;
+}
+
+/// Append a human-readable date/time section using configured timezone.
+/// Supported timezone values:
+/// - "UTC" (default)
+/// - fixed offsets in format "UTC+HH:MM" or "UTC-HH:MM"
+fn appendDateTimeSection(w: anytype, timezone: []const u8) !void {
+    const offset_secs = parseUtcOffsetSeconds(timezone) orelse 0;
+    const adjusted_ts: i64 = std.time.timestamp() + offset_secs;
+    const safe_ts: u64 = if (adjusted_ts < 0) 0 else @intCast(adjusted_ts);
+
+    const tz_label = if (parseUtcOffsetSeconds(timezone) != null) timezone else "UTC";
+    const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = safe_ts };
     const epoch_day = epoch_seconds.getEpochDay();
     const year_day = epoch_day.calculateYearDay();
     const month_day = year_day.calculateMonthDay();
@@ -700,8 +726,8 @@ fn appendDateTimeSection(w: anytype) !void {
     const hour = day_seconds.getHoursIntoDay();
     const minute = day_seconds.getMinutesIntoHour();
 
-    try std.fmt.format(w, "## Current Date & Time\n\n{d}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2} UTC\n\n", .{
-        year, month, day, hour, minute,
+    try std.fmt.format(w, "## Current Date & Time\n\n{d}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2} {s}\n\n", .{
+        year, month, day, hour, minute, tz_label,
     });
 }
 
@@ -1719,8 +1745,7 @@ test "appendDateTimeSection outputs UTC timestamp" {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
     const w = buf.writer(std.testing.allocator);
-    try appendDateTimeSection(w);
-
+    try appendDateTimeSection(w, "UTC");
     const output = buf.items;
     try std.testing.expect(std.mem.indexOf(u8, output, "## Current Date & Time") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "UTC") != null);
@@ -1728,6 +1753,22 @@ test "appendDateTimeSection outputs UTC timestamp" {
     try std.testing.expect(std.mem.indexOf(u8, output, "202") != null);
 }
 
+test "appendDateTimeSection supports fixed UTC offset" {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    const w = buf.writer(std.testing.allocator);
+    try appendDateTimeSection(w, "UTC+08:00");
+    const output = buf.items;
+    try std.testing.expect(std.mem.indexOf(u8, output, "UTC+08:00") != null);
+}
+
+test "parseUtcOffsetSeconds validates supported formats" {
+    try std.testing.expectEqual(@as(?i64, 0), parseUtcOffsetSeconds("UTC"));
+    try std.testing.expectEqual(@as(?i64, 5 * 3600 + 30 * 60), parseUtcOffsetSeconds("UTC+05:30"));
+    try std.testing.expectEqual(@as(?i64, -(3 * 3600)), parseUtcOffsetSeconds("UTC-03:00"));
+    try std.testing.expect(parseUtcOffsetSeconds("Asia/Shanghai") == null);
+    try std.testing.expect(parseUtcOffsetSeconds("UTC+25:00") == null);
+}
 test "appendSkillsSection with no skills produces nothing" {
     const allocator = std.testing.allocator;
     var buf: std.ArrayListUnmanaged(u8) = .empty;

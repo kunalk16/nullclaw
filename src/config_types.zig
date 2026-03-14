@@ -192,6 +192,9 @@ pub const AgentConfig = struct {
     status_show_emojis: bool = true,
     /// Max seconds to wait for an LLM HTTP response (curl --max-time). 0 = no limit.
     message_timeout_secs: u64 = 600,
+    /// Timezone label used for prompt date/time section.
+    /// Supported values: "UTC", "UTC+HH:MM", "UTC-HH:MM".
+    timezone: []const u8 = "UTC",
     /// Per-turn MCP tool filtering. Empty slice = no filtering (all tools included).
     /// See ToolFilterGroup for semantics.
     tool_filter_groups: []const ToolFilterGroup = &.{},

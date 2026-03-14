@@ -2426,7 +2426,7 @@ test "json parse agent section" {
     defer arena.deinit();
     const allocator = arena.allocator();
     const json =
-        \\{"agent": {"compact_context": true, "max_tool_iterations": 20, "max_history_messages": 80, "parallel_tools": true, "tool_dispatcher": "xml", "token_limit": 64000, "status_show_emojis": false, "vision_disabled_models": ["router/text-only"], "auto_disable_vision_on_error": false}}
+        \\{"agent": {"compact_context": true, "max_tool_iterations": 20, "max_history_messages": 80, "parallel_tools": true, "tool_dispatcher": "xml", "token_limit": 64000, "status_show_emojis": false, "timezone": "UTC+08:00", "vision_disabled_models": ["router/text-only"], "auto_disable_vision_on_error": false}}
     ;
     var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
     try cfg.parseJson(json);
@@ -2438,6 +2438,7 @@ test "json parse agent section" {
     try std.testing.expectEqual(@as(u64, 64_000), cfg.agent.token_limit);
     try std.testing.expect(cfg.agent.token_limit_explicit);
     try std.testing.expect(!cfg.agent.status_show_emojis);
+    try std.testing.expectEqualStrings("UTC+08:00", cfg.agent.timezone);
     try std.testing.expectEqual(@as(usize, 1), cfg.agent.vision_disabled_models.len);
     try std.testing.expectEqualStrings("router/text-only", cfg.agent.vision_disabled_models[0]);
     try std.testing.expect(!cfg.agent.auto_disable_vision_on_error);
@@ -2453,6 +2454,7 @@ test "json parse agent token_limit explicit remains false when omitted" {
     try std.testing.expectEqual(config_types.DEFAULT_AGENT_TOKEN_LIMIT, cfg.agent.token_limit);
     try std.testing.expect(!cfg.agent.token_limit_explicit);
     try std.testing.expect(cfg.agent.status_show_emojis);
+    try std.testing.expectEqualStrings("UTC", cfg.agent.timezone);
 }
 
 test "json parse composio section" {
