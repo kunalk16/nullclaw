@@ -2256,10 +2256,10 @@ const ResolvedRuntimeChannel = struct {
 
 fn resolveConfiguredRuntimeChannel(config: *const yc.config.Config, requested: []const u8) ?ResolvedRuntimeChannel {
     for (config.channels.external) |external_cfg| {
-        if (std.mem.eql(u8, external_cfg.channel_name, requested)) {
+        if (std.mem.eql(u8, external_cfg.runtime_name, requested)) {
             return .{
                 .adapter_key = "external",
-                .start_name = external_cfg.channel_name,
+                .start_name = external_cfg.runtime_name,
             };
         }
     }
@@ -2280,8 +2280,8 @@ fn printConfiguredRuntimeChannelNames(config: *const yc.config.Config) void {
     var first = true;
 
     for (config.channels.external) |external_cfg| {
-        if (external_cfg.channel_name.len == 0) continue;
-        std.debug.print(if (first) "Configured runtime channel names: {s}" else ", {s}", .{external_cfg.channel_name});
+        if (external_cfg.runtime_name.len == 0) continue;
+        std.debug.print(if (first) "Configured runtime channel names: {s}" else ", {s}", .{external_cfg.runtime_name});
         first = false;
     }
 
@@ -4031,8 +4031,10 @@ test "resolveConfiguredRuntimeChannel matches external plugin name" {
             .external = &[_]yc.config.ExternalChannelConfig{
                 .{
                     .account_id = "main",
-                    .channel_name = "whatsapp_web",
-                    .command = "nullclaw-plugin-whatsapp-web",
+                    .runtime_name = "whatsapp_web",
+                    .transport = .{
+                        .command = "nullclaw-plugin-whatsapp-web",
+                    },
                 },
             },
         },

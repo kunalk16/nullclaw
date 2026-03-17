@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import deque
 from pathlib import Path
@@ -41,7 +42,7 @@ class WhatsAppWebPlugin:
         self.poll_thread: threading.Thread | None = None
         self.poll_thread_stop_event: threading.Event | None = None
 
-        self.channel_name = os.environ.get("NULLCLAW_CHANNEL_NAME", "whatsapp_web")
+        self.runtime_name = os.environ.get("NULLCLAW_EXTERNAL_RUNTIME_NAME", "whatsapp_web")
         self.account_id = "default"
         self.bridge_url = "http://127.0.0.1:3301"
         self.api_key: str | None = None
@@ -105,8 +106,7 @@ class WhatsAppWebPlugin:
     def dispatch(self, method: str, params: dict[str, Any]) -> Any:
         if method == "get_manifest":
             return {
-                "channel_name": self.channel_name,
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "capabilities": {
                     "health": True,
                 },
@@ -122,9 +122,9 @@ class WhatsAppWebPlugin:
         raise JsonRpcError(-32601, f"unknown method: {method}")
 
     def start(self, params: dict[str, Any]) -> dict[str, Any]:
-        channel_name = str(params.get("channel_name") or self.channel_name).strip()
-        if channel_name != self.channel_name:
-            raise JsonRpcError(-32602, f"channel_name mismatch: expected {self.channel_name}")
+        runtime = params.get("runtime")
+        if not isinstance(runtime, dict):
+            raise JsonRpcError(-32602, "runtime must be an object")
 
         config = params.get("config")
         if config is None:
@@ -132,10 +132,17 @@ class WhatsAppWebPlugin:
         if not isinstance(config, dict):
             raise JsonRpcError(-32602, "config must be an object")
 
-        self.account_id = str(params.get("account_id") or "default").strip() or "default"
+        runtime_name = str(runtime.get("name") or self.runtime_name).strip()
+        if not runtime_name:
+            raise JsonRpcError(-32602, "runtime.name is required")
+
+        self.runtime_name = runtime_name
+        self.account_id = str(runtime.get("account_id") or "default").strip() or "default"
         self.bridge_url = str(config.get("bridge_url") or self.bridge_url).strip().rstrip("/")
         if not self.bridge_url:
             raise JsonRpcError(-32602, "config.bridge_url is required")
+        if not self.is_valid_bridge_url(self.bridge_url):
+            raise JsonRpcError(-32602, "config.bridge_url must be https:// or local loopback http://")
 
         api_key = config.get("api_key")
         self.api_key = str(api_key).strip() if isinstance(api_key, str) and api_key.strip() else None
@@ -144,7 +151,7 @@ class WhatsAppWebPlugin:
         self.group_policy = str(config.get("group_policy") or "allowlist").strip() or "allowlist"
         self.poll_interval_ms = self.parse_positive_int(config.get("poll_interval_ms"), 1500)
         self.bridge_timeout_ms = self.parse_positive_int(config.get("timeout_ms"), 10000)
-        state_dir = config.get("state_dir")
+        state_dir = runtime.get("state_dir")
         self.state_dir = str(state_dir).strip() if isinstance(state_dir, str) and state_dir.strip() else None
 
         if not self.stop():
@@ -163,7 +170,7 @@ class WhatsAppWebPlugin:
             daemon=True,
         )
         self.poll_thread.start()
-        return {"started": True, "channel_name": self.channel_name, "account_id": self.account_id}
+        return {"started": True, "runtime": {"name": self.runtime_name, "account_id": self.account_id}}
 
     def stop(self) -> bool:
         if self.poll_thread_stop_event is not None:
@@ -190,16 +197,28 @@ class WhatsAppWebPlugin:
         }
 
     def send(self, params: dict[str, Any]) -> dict[str, Any]:
-        stage = str(params.get("stage") or "final")
+        runtime = params.get("runtime")
+        if not isinstance(runtime, dict):
+            raise JsonRpcError(-32602, "runtime must be an object")
+        if str(runtime.get("name") or "").strip() != self.runtime_name:
+            raise JsonRpcError(-32602, "runtime.name mismatch")
+        if str(runtime.get("account_id") or "").strip() != self.account_id:
+            raise JsonRpcError(-32602, "runtime.account_id mismatch")
+
+        message_payload = params.get("message")
+        if not isinstance(message_payload, dict):
+            raise JsonRpcError(-32602, "message must be an object")
+
+        stage = str(message_payload.get("stage") or "final")
         if stage != "final":
             return {"accepted": False, "ignored_stage": stage}
 
-        target = str(params.get("target") or "").strip()
+        target = str(message_payload.get("target") or "").strip()
         if not target:
             raise JsonRpcError(-32602, "target is required")
 
-        message = str(params.get("message") or "")
-        media = params.get("media")
+        message = str(message_payload.get("content") or "")
+        media = message_payload.get("media")
         if isinstance(media, list) and media:
             self.log("ignoring media attachments; bridge adapter is text-only")
 
@@ -289,15 +308,17 @@ class WhatsAppWebPlugin:
         if message_id:
             metadata["message_id"] = message_id
 
-        session_key = f"{self.channel_name}:{self.account_id}:{peer_kind}:{peer_id}"
+        session_key = f"{self.runtime_name}:{self.account_id}:{peer_kind}:{peer_id}"
         self.notify(
             "inbound_message",
             {
-                "sender_id": sender,
-                "chat_id": chat_id,
-                "content": text,
-                "session_key": session_key,
-                "metadata": metadata,
+                "message": {
+                    "sender_id": sender,
+                    "chat_id": chat_id,
+                    "content": text,
+                    "session_key": session_key,
+                    "metadata": metadata,
+                }
             },
         )
 
@@ -385,6 +406,17 @@ class WhatsAppWebPlugin:
             pass
         return default
 
+    def is_valid_bridge_url(self, raw_url: str) -> bool:
+        try:
+            parsed = urllib.parse.urlparse(raw_url)
+        except ValueError:
+            return False
+        if parsed.scheme == "https":
+            return bool(parsed.netloc)
+        if parsed.scheme != "http":
+            return False
+        return parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+
     def is_sender_allowed(self, sender: str, is_group: bool) -> bool:
         if not is_group:
             if not self.allow_from:
@@ -439,7 +471,7 @@ class WhatsAppWebPlugin:
 
         if not isinstance(payload, dict):
             return
-        if payload.get("channel_name") != self.channel_name:
+        if payload.get("runtime_name") != self.runtime_name:
             return
         if payload.get("account_id") != self.account_id:
             return
@@ -468,7 +500,7 @@ class WhatsAppWebPlugin:
         path.parent.mkdir(parents=True, exist_ok=True)
         with self.state_lock:
             payload = {
-                "channel_name": self.channel_name,
+                "runtime_name": self.runtime_name,
                 "account_id": self.account_id,
                 "bridge_url": self.bridge_url,
                 "cursor": self.cursor or "",
@@ -486,7 +518,7 @@ class WhatsAppWebPlugin:
                 base = Path(xdg_state_home) / "nullclaw" / "external"
             else:
                 base = Path.home() / ".local" / "state" / "nullclaw" / "external"
-        return base / f"{self.channel_name}-{self.normalized_account_id()}.json"
+        return base / f"{self.runtime_name}-{self.normalized_account_id()}.json"
 
     def normalized_account_id(self) -> str:
         raw = self.account_id.strip() or "default"

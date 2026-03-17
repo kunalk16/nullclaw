@@ -267,12 +267,14 @@ External channel plugin example:
     "external": {
       "accounts": {
         "wa-web": {
-          "channel_name": "whatsapp_web",
-          "command": "nullclaw-plugin-whatsapp-web",
-          "args": ["--stdio"],
-          "timeout_ms": 10000,
-          "env": {
-            "PLUGIN_TOKEN": "secret"
+          "runtime_name": "whatsapp_web",
+          "transport": {
+            "command": "nullclaw-plugin-whatsapp-web",
+            "args": ["--stdio"],
+            "timeout_ms": 10000,
+            "env": {
+              "PLUGIN_TOKEN": "secret"
+            }
           },
           "config": {
             "bridge_url": "http://127.0.0.1:3301",
@@ -287,17 +289,20 @@ External channel plugin example:
 
 External channel notes:
 
-- `channel_name` is the runtime channel id used by routing, bindings, session keys, and outbound dispatch.
-- `command` plus optional `args` starts the plugin as a child process over line-delimited JSON-RPC on stdio.
-- `timeout_ms` bounds host->plugin RPC waits (`get_manifest`, `start`, `send`, `health`, `stop`).
-- `env` is forwarded only to the plugin process.
-- `config` is opaque JSON forwarded to the plugin `start` request as `params.config`.
+- `runtime_name` is the nullclaw runtime channel id used by routing, bindings, session keys, and outbound dispatch. It must not reuse a built-in channel name or another runtime name already claimed by a different channel type.
+- `transport.command` plus optional `transport.args` starts the plugin as a child process over line-delimited JSON-RPC on stdio.
+- `transport.timeout_ms` bounds host->plugin RPC waits; nullclaw still caps control-plane waits internally so one broken plugin cannot stall supervision for minutes.
+- `transport.env` is forwarded only to the plugin process.
+- `config` must be a JSON object; it is forwarded to the plugin `start` request as `params.config`.
 - Plugins must answer `get_manifest`, handle `start`/`send`/`stop`; `health` is recommended so supervision can detect disconnected sidecars instead of only live processes.
-- `get_manifest.result` should contain `channel_name`; plugins may also advertise `protocol_version: 1` and `capabilities.health: true|false`.
-- `inbound_message.params` should include `sender_id`, `chat_id`, and `content`; include `metadata.peer_kind` plus `metadata.peer_id` when you want routing/bindings to distinguish direct vs group peers for unknown channels.
+- `get_manifest.result` must contain `protocol_version: 2`; `capabilities.health: true|false` is optional.
+- `health.result` must report an explicit boolean (`healthy`) or explicit health signals (`ok`, `connected`, `logged_in`); an empty object is treated as invalid.
+- `start.params` now has a nested `runtime` object with `name`, `account_id`, and host-owned `state_dir`.
+- `send.params` now has nested `runtime` and `message` objects.
+- `inbound_message.params.message` should include `sender_id`, `chat_id`, and `content`; include `metadata.peer_kind` plus `metadata.peer_id` when you want routing/bindings to distinguish direct vs group peers for unknown channels.
 - Unknown/external channels can also set `metadata.is_group` or `metadata.is_dm`; nullclaw now promotes that metadata into prompt conversation context.
 - A reference bridge adapter for the PR #265 WhatsApp Web sidecar lives in `examples/whatsapp-web/nullclaw-plugin-whatsapp-web`.
-- `nullclaw channel start external` starts the first configured external account; `nullclaw channel start <channel_name>` targets a specific configured runtime name such as `whatsapp_web`.
+- `nullclaw channel start external` starts the first configured external account; `nullclaw channel start <runtime_name>` targets a specific configured runtime name such as `whatsapp_web`.
 
 Telegram example:
 

@@ -804,9 +804,11 @@ test "ChannelManager collectConfiguredChannels wires listener types accounts and
     const external_accounts = [_]@import("config_types.zig").ExternalChannelConfig{
         .{
             .account_id = "ext-main",
-            .channel_name = "whatsapp_web",
-            .command = "nullclaw-plugin-whatsapp-web",
-            .config_json = "{\"allow_from\":[\"*\"]}",
+            .runtime_name = "whatsapp_web",
+            .transport = .{
+                .command = "nullclaw-plugin-whatsapp-web",
+            },
+            .plugin_config_json = "{\"allow_from\":[\"*\"]}",
         },
     };
     const max_accounts = [_]@import("config_types.zig").MaxConfig{

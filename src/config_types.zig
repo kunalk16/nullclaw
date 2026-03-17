@@ -759,20 +759,26 @@ pub const ExternalChannelConfig = struct {
         value: []const u8,
     };
 
-    account_id: []const u8 = "default",
-    /// Runtime channel identifier exposed to the rest of nullclaw.
-    /// Example: "whatsapp_web"
-    channel_name: []const u8 = "",
-    /// Plugin executable launched over JSON-RPC/stdio.
-    command: []const u8 = "",
-    args: []const []const u8 = &.{},
-    env: []const EnvEntry = &.{},
-    /// Per-request timeout for plugin RPC calls over stdio.
-    timeout_ms: u32 = 10_000,
-    /// Raw JSON object/array forwarded as params.config during the start request.
-    config_json: []const u8 = "{}",
+    pub const TransportConfig = struct {
+        command: []const u8 = "",
+        args: []const []const u8 = &.{},
+        env: []const EnvEntry = &.{},
+        timeout_ms: u32 = 10_000,
+    };
 
-    pub fn isValidChannelName(raw: []const u8) bool {
+    account_id: []const u8 = "default",
+    /// Runtime channel identifier exposed inside nullclaw routing and bindings.
+    /// Example: "whatsapp_web"
+    runtime_name: []const u8 = "",
+    /// Plugin process transport configuration (JSON-RPC over stdio).
+    transport: TransportConfig = .{},
+    /// Raw JSON object forwarded as params.config during the start request.
+    plugin_config_json: []const u8 = "{}",
+    /// Runtime-only host-owned state directory for plugin persistence.
+    /// Backfilled by Config.load(); never serialized.
+    state_dir: []const u8 = ".",
+
+    pub fn isValidRuntimeName(raw: []const u8) bool {
         const trimmed = std.mem.trim(u8, raw, " \t\r\n");
         if (trimmed.len == 0 or trimmed.len > 128) return false;
         for (trimmed) |ch| {

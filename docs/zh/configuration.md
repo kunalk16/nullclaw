@@ -158,12 +158,14 @@ nullclaw onboard --interactive
     "external": {
       "accounts": {
         "wa-web": {
-          "channel_name": "whatsapp_web",
-          "command": "nullclaw-plugin-whatsapp-web",
-          "args": ["--stdio"],
-          "timeout_ms": 10000,
-          "env": {
-            "PLUGIN_TOKEN": "secret"
+          "runtime_name": "whatsapp_web",
+          "transport": {
+            "command": "nullclaw-plugin-whatsapp-web",
+            "args": ["--stdio"],
+            "timeout_ms": 10000,
+            "env": {
+              "PLUGIN_TOKEN": "secret"
+            }
           },
           "config": {
             "bridge_url": "http://127.0.0.1:3301",
@@ -178,17 +180,20 @@ nullclaw onboard --interactive
 
 外部渠道说明：
 
-- `channel_name` 是运行时渠道 id，routing、bindings、session key 和出站分发都会使用它。
-- `command` 和可选的 `args` 会把插件作为子进程启动，并通过 stdio 上的逐行 JSON-RPC 通信。
-- `timeout_ms` 会限制 host 到插件的 RPC 等待时间（`get_manifest`、`start`、`send`、`health`、`stop`）。
-- `env` 只会传给插件进程本身。
-- `config` 是透传给插件 `start` 请求 `params.config` 的原始 JSON。
+- `runtime_name` 是 nullclaw 内部使用的运行时渠道 id，routing、bindings、session key 和出站分发都会使用它。它不能复用内建 channel 名称，也不能和其他 channel 类型已经占用的运行时名字冲突。
+- `transport.command` 和可选的 `transport.args` 会把插件作为子进程启动，并通过 stdio 上的逐行 JSON-RPC 通信。
+- `transport.timeout_ms` 会限制 host 到插件的 RPC 等待时间；同时 nullclaw 还会在内部对 control-plane 请求做上限裁剪，避免一个坏插件把 supervision 卡住几分钟。
+- `transport.env` 只会传给插件进程本身。
+- `config` 必须是 JSON object；它会原样透传给插件 `start` 请求里的 `params.config`。
 - 插件必须响应 `get_manifest`，处理 `start`、`send`、`stop`；建议实现 `health`，这样 supervision 才能识别“进程活着但 sidecar 已断开”的状态。
-- `get_manifest.result` 至少应包含 `channel_name`；也可以显式声明 `protocol_version: 1` 和 `capabilities.health: true|false`。
-- `inbound_message.params` 至少应包含 `sender_id`、`chat_id`、`content`；如果希望 unknown channel 也能正确做 routing/bindings，建议在 `metadata` 里带上 `peer_kind` 和 `peer_id`。
+- `get_manifest.result` 现在必须显式声明 `protocol_version: 2`；`capabilities.health: true|false` 是可选能力标记。
+- `health.result` 必须返回显式布尔值（`healthy`）或显式健康信号（`ok`、`connected`、`logged_in`）；空对象会被视为无效响应。
+- `start.params` 现在包含嵌套的 `runtime` 对象，里面有 `name`、`account_id` 和 host 提供的 `state_dir`。
+- `send.params` 现在也拆成嵌套的 `runtime` 和 `message` 对象。
+- `inbound_message.params.message` 至少应包含 `sender_id`、`chat_id`、`content`；如果希望 unknown channel 也能正确做 routing/bindings，建议在 `metadata` 里带上 `peer_kind` 和 `peer_id`。
 - unknown/external channel 也可以提供 `metadata.is_group` 或 `metadata.is_dm`，nullclaw 现在会把这些信息提升到 prompt 的 conversation context。
 - PR #265 的 WhatsApp Web bridge 兼容适配器示例放在 `examples/whatsapp-web/nullclaw-plugin-whatsapp-web`。
-- `nullclaw channel start external` 会启动第一个已配置的外部账号；`nullclaw channel start <channel_name>` 可以直接启动某个具体运行时名字，比如 `whatsapp_web`。
+- `nullclaw channel start external` 会启动第一个已配置的外部账号；`nullclaw channel start <runtime_name>` 可以直接启动某个具体运行时名字，比如 `whatsapp_web`。
 
 Telegram 示例：
 

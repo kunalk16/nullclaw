@@ -437,6 +437,42 @@ fn parseExternalEnv(
     return try entries.toOwnedSlice(allocator);
 }
 
+fn parseExternalTransportConfig(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+) !types.ExternalChannelConfig.TransportConfig {
+    var transport = types.ExternalChannelConfig.TransportConfig{};
+    if (value != .object) return transport;
+
+    const obj = value.object;
+    if (obj.get("command")) |command_value| {
+        if (command_value == .string) {
+            transport.command = try allocator.dupe(u8, command_value.string);
+        }
+    }
+    if (obj.get("args")) |args_value| {
+        if (args_value == .array) {
+            transport.args = try parseStringArray(allocator, args_value.array);
+        }
+    }
+    if (obj.get("env")) |env_value| {
+        transport.env = try parseExternalEnv(allocator, env_value);
+    }
+    if (obj.get("timeout_ms")) |timeout_value| {
+        if (timeout_value == .integer) {
+            if (timeout_value.integer >= 0 and timeout_value.integer <= std.math.maxInt(u32)) {
+                transport.timeout_ms = @intCast(timeout_value.integer);
+            } else {
+                transport.timeout_ms = 0;
+            }
+        } else {
+            transport.timeout_ms = 0;
+        }
+    }
+
+    return transport;
+}
+
 fn parseExternalChannelAccount(
     self: *Config,
     account_id: []const u8,
@@ -450,41 +486,18 @@ fn parseExternalChannelAccount(
         .account_id = try self.allocator.dupe(u8, account_id),
     };
 
-    if (obj.get("channel_name")) |channel_name_value| {
-        if (channel_name_value == .string) {
-            parsed.channel_name = try self.allocator.dupe(u8, channel_name_value.string);
+    if (obj.get("runtime_name")) |runtime_name_value| {
+        if (runtime_name_value == .string) {
+            parsed.runtime_name = try self.allocator.dupe(u8, runtime_name_value.string);
         }
     }
-    if (obj.get("command")) |command_value| {
-        if (command_value == .string) {
-            parsed.command = try self.allocator.dupe(u8, command_value.string);
-        }
-    }
-    if (obj.get("args")) |args_value| {
-        if (args_value == .array) {
-            parsed.args = try parseStringArray(self.allocator, args_value.array);
-        }
-    }
-    if (obj.get("env")) |env_value| {
-        parsed.env = try parseExternalEnv(self.allocator, env_value);
-    }
-    if (obj.get("timeout_ms")) |timeout_value| {
-        if (timeout_value == .integer) {
-            if (timeout_value.integer >= 0 and timeout_value.integer <= std.math.maxInt(u32)) {
-                parsed.timeout_ms = @intCast(timeout_value.integer);
-            } else {
-                // Preserve invalid values as an out-of-range sentinel so validate()
-                // reports a concrete config error instead of silently falling back.
-                parsed.timeout_ms = 0;
-            }
-        } else {
-            parsed.timeout_ms = 0;
-        }
+    if (obj.get("transport")) |transport_value| {
+        parsed.transport = try parseExternalTransportConfig(self.allocator, transport_value);
     }
     if (obj.get("config")) |config_value| {
-        parsed.config_json = try std.json.Stringify.valueAlloc(self.allocator, config_value, .{});
+        parsed.plugin_config_json = try std.json.Stringify.valueAlloc(self.allocator, config_value, .{});
     } else {
-        parsed.config_json = try self.allocator.dupe(u8, parsed.config_json);
+        parsed.plugin_config_json = try self.allocator.dupe(u8, parsed.plugin_config_json);
     }
 
     return parsed;
