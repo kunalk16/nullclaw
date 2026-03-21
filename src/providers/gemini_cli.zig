@@ -19,7 +19,7 @@ const log = std.log.scoped(.gemini_cli);
 pub const GeminiCliProvider = struct {
     allocator: std.mem.Allocator,
     model: []const u8,
-    
+
     /// Persistent state
     child: ?*std.process.Child = null,
     child_argv: ?[][]const u8 = null,
@@ -31,6 +31,7 @@ pub const GeminiCliProvider = struct {
 
     const DEFAULT_MODEL = "gemini-2.0-flash";
     const CLI_NAME = "gemini";
+    const ACP_PROTOCOL_VERSION: u32 = 1;
 
     pub fn init(allocator: std.mem.Allocator, model: ?[]const u8) !GeminiCliProvider {
         // Just verify CLI is in PATH, don't start it yet.
@@ -157,7 +158,7 @@ pub const GeminiCliProvider = struct {
         // Higher-level security is enforced by nullclaw's own tool approval logic.
         try argv_list.append(self.allocator, try self.allocator.dupe(u8, "yolo"));
         self.child_argv = try argv_list.toOwnedSlice(self.allocator);
-        
+
         const child = try self.allocator.create(std.process.Child);
         errdefer self.allocator.destroy(child);
         child.* = std.process.Child.init(self.child_argv.?, self.allocator);
@@ -170,26 +171,43 @@ pub const GeminiCliProvider = struct {
         const pid: i64 = if (builtin.os.tag == .windows) @intCast(@intFromPtr(self.child.?.id)) else self.child.?.id;
         log.debug("process spawned (pid={d})", .{pid});
 
-        // Step 2: session/new
-        const id = self.next_id;
+        try self.initializeSession();
+    }
+
+    fn initializeSession(self: *GeminiCliProvider) !void {
+        const init_id = self.next_id;
         self.next_id += 1;
 
-        const req = try std.json.Stringify.valueAlloc(self.allocator, .{
-            .jsonrpc = "2.0",
-            .id = id,
-            .method = "session/new",
-            .params = .{
-                .cwd = ".",
-                .mcpServers = &[_][]const u8{},
-            },
-        }, .{});
-        defer self.allocator.free(req);
+        const init_req = try buildInitializeRequest(self.allocator, init_id);
+        defer self.allocator.free(init_req);
+
+        log.debug("sending initialize handshake...", .{});
+        try self.sendJsonRpcLine(init_req);
+
+        try self.readInitializeResponse(init_id);
+
+        const cwd = try std.fs.cwd().realpathAlloc(self.allocator, ".");
+        defer self.allocator.free(cwd);
+
+        const session_id = self.next_id;
+        self.next_id += 1;
+
+        const session_req = try buildSessionNewRequest(self.allocator, session_id, cwd);
+        defer self.allocator.free(session_req);
 
         log.debug("sending session/new handshake...", .{});
-        try self.child.?.stdin.?.writeAll(req);
-        try self.child.?.stdin.?.writeAll("\n");
+        try self.sendJsonRpcLine(session_req);
 
-        // Read responses until we get the result for our ID
+        self.session_id = try self.readSessionNewResponse(session_id);
+        log.debug("handshake complete, sessionId={s}", .{self.session_id.?});
+    }
+
+    fn sendJsonRpcLine(self: *GeminiCliProvider, line: []const u8) !void {
+        try self.child.?.stdin.?.writeAll(line);
+        try self.child.?.stdin.?.writeAll("\n");
+    }
+
+    fn readInitializeResponse(self: *GeminiCliProvider, id: u32) !void {
         while (true) {
             const line = try self.readLine(self.allocator);
             defer self.allocator.free(line);
@@ -199,44 +217,70 @@ pub const GeminiCliProvider = struct {
             };
             defer parsed.deinit();
 
-            if (parsed.value != .object) {
-                continue;
-            }
+            if (parsed.value != .object) continue;
             const obj = parsed.value.object;
 
-            if (obj.get("id")) |resp_id| {
-                const id_match = switch (resp_id) {
-                    .integer => |vid| vid == id,
-                    .float => |vid| @as(u32, @intFromFloat(vid)) == id,
-                    else => false,
-                };
-                if (id_match) {
-                    const result = obj.get("result") orelse {
-                        if (obj.get("error")) |err_val| {
-                            log.err("Gemini ACP session/new failed with error: {any}", .{err_val});
-                        } else {
-                            log.err("Gemini ACP session/new failed: no result or error field. Response: {s}", .{line});
-                        }
-                        return error.InvalidHandshake;
-                    };
-                    if (result != .object) {
-                        log.err("Gemini ACP session/new failed: result is not an object. Response: {s}", .{line});
-                        return error.InvalidHandshake;
-                    }
-                    const sid = result.object.get("sessionId") orelse {
-                        log.err("Gemini ACP session/new failed: result object missing sessionId. Response: {s}", .{line});
-                        return error.InvalidHandshake;
-                    };
-                    if (sid != .string) {
-                        log.err("Gemini ACP session/new failed: sessionId is not a string. Response: {s}", .{line});
-                        return error.InvalidHandshake;
-                    }
+            if (!responseIdMatches(obj.get("id"), id)) continue;
 
-                    self.session_id = try self.allocator.dupe(u8, sid.string);
-                    log.debug("handshake complete, sessionId={s}", .{self.session_id.?});
-                    break;
-                }
+            const result = obj.get("result") orelse {
+                recordJsonRpcError("Gemini ACP initialize", line, obj.get("error"));
+                return error.InvalidHandshake;
+            };
+            if (result != .object) {
+                log.err("Gemini ACP initialize failed: result is not an object. Response: {s}", .{line});
+                return error.InvalidHandshake;
             }
+
+            const protocol_version = result.object.get("protocolVersion") orelse {
+                log.err("Gemini ACP initialize failed: result object missing protocolVersion. Response: {s}", .{line});
+                return error.InvalidHandshake;
+            };
+
+            switch (protocol_version) {
+                .integer, .float => {},
+                else => {
+                    log.err("Gemini ACP initialize failed: protocolVersion is not numeric. Response: {s}", .{line});
+                    return error.InvalidHandshake;
+                },
+            }
+
+            return;
+        }
+    }
+
+    fn readSessionNewResponse(self: *GeminiCliProvider, id: u32) ![]const u8 {
+        while (true) {
+            const line = try self.readLine(self.allocator);
+            defer self.allocator.free(line);
+
+            const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, line, .{}) catch {
+                continue;
+            };
+            defer parsed.deinit();
+
+            if (parsed.value != .object) continue;
+            const obj = parsed.value.object;
+
+            if (!responseIdMatches(obj.get("id"), id)) continue;
+
+            const result = obj.get("result") orelse {
+                recordJsonRpcError("Gemini ACP session/new", line, obj.get("error"));
+                return error.InvalidHandshake;
+            };
+            if (result != .object) {
+                log.err("Gemini ACP session/new failed: result is not an object. Response: {s}", .{line});
+                return error.InvalidHandshake;
+            }
+            const sid = result.object.get("sessionId") orelse {
+                log.err("Gemini ACP session/new failed: result object missing sessionId. Response: {s}", .{line});
+                return error.InvalidHandshake;
+            };
+            if (sid != .string) {
+                log.err("Gemini ACP session/new failed: sessionId is not a string. Response: {s}", .{line});
+                return error.InvalidHandshake;
+            }
+
+            return try self.allocator.dupe(u8, sid.string);
         }
     }
 
@@ -310,18 +354,18 @@ pub const GeminiCliProvider = struct {
                     // This is our response
                     if (obj.get("result")) |res| {
                         if (res == .object) {
-                             if (res.object.get("content")) |c| {
-                                 if (c == .string) {
-                                     if (c.string.len > 0) {
-                                         result_buf.clearRetainingCapacity();
-                                         try result_buf.appendSlice(allocator, c.string);
-                                     }
-                                 }
-                             }
+                            if (res.object.get("content")) |c| {
+                                if (c == .string) {
+                                    if (c.string.len > 0) {
+                                        result_buf.clearRetainingCapacity();
+                                        try result_buf.appendSlice(allocator, c.string);
+                                    }
+                                }
+                            }
                         }
                     } else if (obj.get("error")) |err_val| {
                         log.err("Gemini ACP prompt failed with error: {any}", .{err_val});
-                        
+
                         // Record detailed error message if available
                         if (err_val == .object) {
                             if (err_val.object.get("message")) |err_msg_val| {
@@ -330,7 +374,7 @@ pub const GeminiCliProvider = struct {
                                 }
                             }
                         }
-                        
+
                         return error.ApiError;
                     }
                     break;
@@ -352,7 +396,7 @@ pub const GeminiCliProvider = struct {
                 const line_end = self.read_offset + pos;
                 const line = try allocator.dupe(u8, self.read_buffer.items[self.read_offset..line_end]);
                 errdefer allocator.free(line);
-                
+
                 self.read_offset = line_end + 1;
 
                 // Strip non-JSON prefixes
@@ -423,6 +467,66 @@ pub const GeminiCliProvider = struct {
     }
 };
 
+fn buildInitializeRequest(allocator: std.mem.Allocator, id: u32) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try buf.appendSlice(allocator, "{\"jsonrpc\":\"2.0\",\"id\":");
+    {
+        var id_buf: [24]u8 = undefined;
+        const id_text = try std.fmt.bufPrint(&id_buf, "{d}", .{id});
+        try buf.appendSlice(allocator, id_text);
+    }
+    try buf.appendSlice(allocator, ",\"method\":\"initialize\",\"params\":{\"protocolVersion\":");
+    {
+        var protocol_buf: [24]u8 = undefined;
+        const protocol_text = try std.fmt.bufPrint(&protocol_buf, "{d}", .{GeminiCliProvider.ACP_PROTOCOL_VERSION});
+        try buf.appendSlice(allocator, protocol_text);
+    }
+    try buf.appendSlice(allocator, ",\"clientCapabilities\":{}}}");
+    return buf.toOwnedSlice(allocator);
+}
+
+fn buildSessionNewRequest(allocator: std.mem.Allocator, id: u32, cwd: []const u8) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try buf.appendSlice(allocator, "{\"jsonrpc\":\"2.0\",\"id\":");
+    {
+        var id_buf: [24]u8 = undefined;
+        const id_text = try std.fmt.bufPrint(&id_buf, "{d}", .{id});
+        try buf.appendSlice(allocator, id_text);
+    }
+    try buf.appendSlice(allocator, ",\"method\":\"session/new\",\"params\":{\"cwd\":");
+    try root.appendJsonString(&buf, allocator, cwd);
+    try buf.appendSlice(allocator, ",\"mcpServers\":[]}}");
+    return buf.toOwnedSlice(allocator);
+}
+
+fn responseIdMatches(resp_id: ?std.json.Value, id: u32) bool {
+    const value = resp_id orelse return false;
+    return switch (value) {
+        .integer => |vid| vid == id,
+        .float => |vid| @as(u32, @intFromFloat(vid)) == id,
+        else => false,
+    };
+}
+
+fn recordJsonRpcError(prefix: []const u8, line: []const u8, err_val: ?std.json.Value) void {
+    if (err_val) |err_obj| {
+        log.err("{s} failed with error: {any}", .{ prefix, err_obj });
+        if (err_obj == .object) {
+            if (err_obj.object.get("message")) |msg| {
+                if (msg == .string) {
+                    root.setLastApiErrorDetail("gemini-cli", msg.string);
+                }
+            }
+        }
+    } else {
+        log.err("{s} failed: no result or error field. Response: {s}", .{ prefix, line });
+    }
+}
+
 fn parseModelsJson(allocator: std.mem.Allocator, out: []const u8) ![][]const u8 {
     // Extract tokens that look like Gemini model IDs ("gemini-*").
     var models: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -440,13 +544,15 @@ fn parseModelsJson(allocator: std.mem.Allocator, out: []const u8) ![][]const u8 
         const obj = parsed.value.object;
         const type_val = obj.get("type") orelse continue;
         if (type_val != .string) continue;
-        
+
         var text: ?[]const u8 = null;
         if (std.mem.eql(u8, type_val.string, "message") or
             std.mem.eql(u8, type_val.string, "output") or
             std.mem.eql(u8, type_val.string, "content"))
         {
-             if (obj.get("content")) |c| if (c == .string) { text = c.string; };
+            if (obj.get("content")) |c| if (c == .string) {
+                text = c.string;
+            };
         }
         if (text) |t| {
             var token_iter = std.mem.tokenizeScalar(u8, t, ' ');
@@ -546,4 +652,44 @@ test "extractLastUserMessage empty messages" {
 test "checkCliVersion returns CliNotFound for missing binary" {
     const result = checkCliVersion(std.testing.allocator, "nonexistent_binary_xyzzy_gemini_99999");
     try std.testing.expectError(error.CliNotFound, result);
+}
+
+test "buildInitializeRequest uses numeric protocolVersion" {
+    const req = try buildInitializeRequest(std.testing.allocator, 7);
+    defer std.testing.allocator.free(req);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, req, .{});
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+    try std.testing.expectEqual(@as(i64, 7), obj.get("id").?.integer);
+    try std.testing.expectEqualStrings("initialize", obj.get("method").?.string);
+
+    const params = obj.get("params").?.object;
+    try std.testing.expect(params.get("protocolVersion").? == .integer);
+    try std.testing.expectEqual(@as(i64, GeminiCliProvider.ACP_PROTOCOL_VERSION), params.get("protocolVersion").?.integer);
+    try std.testing.expect(params.get("clientCapabilities").? == .object);
+}
+
+test "buildSessionNewRequest includes cwd and mcpServers" {
+    const req = try buildSessionNewRequest(std.testing.allocator, 9, "/tmp/workspace");
+    defer std.testing.allocator.free(req);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, req, .{});
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+    try std.testing.expectEqual(@as(i64, 9), obj.get("id").?.integer);
+    try std.testing.expectEqualStrings("session/new", obj.get("method").?.string);
+
+    const params = obj.get("params").?.object;
+    try std.testing.expectEqualStrings("/tmp/workspace", params.get("cwd").?.string);
+    try std.testing.expect(params.get("mcpServers").? == .array);
+    try std.testing.expectEqual(@as(usize, 0), params.get("mcpServers").?.array.items.len);
+}
+
+test "responseIdMatches handles integer ids" {
+    try std.testing.expect(responseIdMatches(.{ .integer = 42 }, 42));
+    try std.testing.expect(!responseIdMatches(.{ .integer = 41 }, 42));
+    try std.testing.expect(!responseIdMatches(null, 42));
 }
