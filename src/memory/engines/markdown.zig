@@ -79,36 +79,22 @@ pub const MarkdownMemory = struct {
         return total_seconds;
     }
 
-    fn isLeap(y: i16) bool {
-        const four: i16 = 4;
-        const hundred: i16 = 100;
-        const four_hundred: i16 = 400;
-        return (@mod(y, four) == 0 and @mod(y, hundred) != 0) or @mod(y, four_hundred) == 0;
-    }
-
-    // Convert Gregorian Y-M-D to days since 1970-01-01 (epoch day 0).
+    // Convert Gregorian Y-M-D to days since 1970-01-01 (epoch day 0) using Julian Day Number.
     fn ymdToEpochDays(year: i16, month: u8, day: u8) i64 {
-        var days: i64 = 0;
-        var y: i16 = 1970;
-        while (y < year) : (y += 1) {
-            days += if (isLeap(y)) 366 else 365;
+        var y = @as(i32, @intCast(year));
+        var m = @as(i32, @intCast(month));
+        if (m <= 2) {
+            y -= 1;
+            m += 12;
         }
-        const month_days = [12]u8{ 31, if (isLeap(year)) 29 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-        var m: u8 = 1;
-        while (m < month) : (m += 1) {
-            days += month_days[m - 1];
-        }
-        days += @as(i64, day) - 1;
+        const era = if (y >= 0) @divTrunc(y, 400) else @divTrunc(y - 399, 400);
+        const yoe = @as(u32, @intCast(y - era * 400)); // [0, 399]
+        const doy = (153 * (m - 3) + 2) / 5 + @as(u32, @intCast(day)) - 1; // [0, 365]
+        const doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+        const days = era * 146097 + @as(i64, @intCast(doe)) - 719468;
         return days;
     }
 
-    // Get file modification time as fallback timestamp.
-    fn getFileMtime(full_path: []const u8) i64 {
-        const file = std.fs.cwd().openFile(full_path, .{}) catch return 0;
-        defer file.close();
-        const stat = fs_compat.stat(file) catch return 0;
-        return @as(i64, @intCast(stat.mtime));
-    }
 
     fn corePath(self: *const Self, allocator: std.mem.Allocator) ![]u8 {
         return std.fmt.allocPrint(allocator, "{s}/MEMORY.md", .{self.workspace_dir});
@@ -230,6 +216,9 @@ pub const MarkdownMemory = struct {
             line_idx += 1;
         }
 
+        // Free the template timestamp string; each entry has its own copy.
+        allocator.free(timestamp_str);
+
         return entries.toOwnedSlice(allocator);
     }
 
@@ -259,16 +248,11 @@ pub const MarkdownMemory = struct {
             const root_path = try self.rootPath(allocator, candidate.filename);
             defer allocator.free(root_path);
 
-            // Determine timestamp: try parse from filename, else fall back to file mtime
-            const file_timestamp = blk: {
-                const parsed = parseTimestamp(candidate.filename);
-                if (parsed != 0) {
-                    break :blk parsed;
-                }
-                break :blk getFileMtime(root_path);
-            };
-
-            const content = fs_compat.readFileAlloc(std.fs.cwd(), allocator, root_path, 1024 * 1024) catch continue;
+            // Open file, get its stat, then read content in one go.
+            const file = std.fs.cwd().openFile(root_path, .{}) catch continue;
+            defer file.close();
+            const stat = fs_compat.stat(file) catch continue;
+            const content = file.readToEndAlloc(allocator, 1024 * 1024) catch continue;
             defer allocator.free(content);
 
             const canonical = std.fs.realpathAlloc(allocator, root_path) catch
@@ -279,6 +263,16 @@ pub const MarkdownMemory = struct {
                 continue;
             }
             try seen_root_paths.put(allocator, canonical, {});
+
+            // Resolve timestamp: parse from filename, else use file mtime.
+            const file_timestamp = blk: {
+                const parsed = parseTimestamp(candidate.filename);
+                if (parsed != 0) {
+                    break :blk parsed;
+                } else {
+                    break :blk @as(i64, @intCast(stat.mtime));
+                }
+            };
 
             const entries = try parseEntries(content, candidate.label, .core, allocator, file_timestamp);
             defer allocator.free(entries);
@@ -295,17 +289,23 @@ pub const MarkdownMemory = struct {
                 if (!std.mem.endsWith(u8, entry.name, ".md")) continue;
                 const fpath = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ md, entry.name });
                 defer allocator.free(fpath);
-                // Compute timestamp for this daily file
+
+                const file = std.fs.cwd().openFile(fpath, .{}) catch continue;
+                defer file.close();
+                const stat = fs_compat.stat(file) catch continue;
+                const content = file.readToEndAlloc(allocator, 1024 * 1024) catch continue;
+                defer allocator.free(content);
+
+                const fname = entry.name[0 .. entry.name.len - 3];
                 const file_timestamp = blk: {
                     const parsed = parseTimestamp(entry.name);
                     if (parsed != 0) {
                         break :blk parsed;
+                    } else {
+                        break :blk @as(i64, @intCast(stat.mtime));
                     }
-                    break :blk getFileMtime(fpath);
                 };
-                const content = fs_compat.readFileAlloc(std.fs.cwd(), allocator, fpath, 1024 * 1024) catch continue;
-                defer allocator.free(content);
-                const fname = entry.name[0 .. entry.name.len - 3];
+
                 const entries = try parseEntries(content, fname, .daily, allocator, file_timestamp);
                 defer allocator.free(entries);
                 for (entries) |e| try all.append(allocator, e);
