@@ -905,3 +905,31 @@ test "shell path_env_vars passes validated vars to child" {
     try std.testing.expect(result.success);
     try std.testing.expectEqualStrings(libs_path, result.output);
 }
+
+test "shell with sandbox enabled wraps command" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest; // Sandboxes not currently available on Windows in tests
+
+    // Create a shell tool with a noop sandbox (simulates active sandbox config)
+    var storage: SandboxStorage = .{};
+    storage.noop = .{};
+    const sandbox = storage.noop.sandbox();
+
+    var st = ShellTool{
+        .workspace_dir = "/tmp",
+        .sandbox = sandbox,
+        .sandbox_storage = storage,
+    };
+    const t = st.tool();
+
+    const parsed = try root.parseTestArgs("{\"command\": \"echo test\"}");
+    defer parsed.deinit();
+
+    // We can't easily test the actual wrapping without mocking process.run,
+    // but we can verify that the sandbox field is set and the tool still executes
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    defer if (result.output.len > 0) std.testing.allocator.free(result.output);
+    defer if (result.error_msg) |e| std.testing.allocator.free(e);
+
+    try std.testing.expect(result.success);
+    try std.testing.expect(std.mem.indexOf(u8, result.output, "test") != null);
+}
