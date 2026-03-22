@@ -7,6 +7,7 @@ pub const ProviderModelRef = struct {
 
 fn splitVersionedUrlProviderModel(model_ref: []const u8) ?ProviderModelRef {
     const proto_start = std.mem.indexOf(u8, model_ref, "://") orelse return null;
+    var last_split: ?ProviderModelRef = null;
     var i: usize = proto_start + 3;
     while (i + 3 < model_ref.len) : (i += 1) {
         if (model_ref[i] != '/' or model_ref[i + 1] != 'v') continue;
@@ -19,12 +20,12 @@ fn splitVersionedUrlProviderModel(model_ref: []const u8) ?ProviderModelRef {
         if (j >= model_ref.len or model_ref[j] != '/') continue;
         if (j + 1 >= model_ref.len) return null;
 
-        return .{
+        last_split = .{
             .provider = model_ref[0..j],
             .model = model_ref[j + 1 ..],
         };
     }
-    return null;
+    return last_split;
 }
 
 pub fn splitProviderModel(model_ref: []const u8) ?ProviderModelRef {
@@ -49,6 +50,12 @@ test "splitProviderModel handles regular refs" {
 test "splitProviderModel handles custom url refs" {
     const split = splitProviderModel("custom:https://api.example.com/openai/v2/qianfan/custom-model") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("custom:https://api.example.com/openai/v2", split.provider.?);
+    try std.testing.expectEqualStrings("qianfan/custom-model", split.model);
+}
+
+test "splitProviderModel uses last versioned segment for nested gateways" {
+    const split = splitProviderModel("custom:https://gateway.example.com/proxy/v1/openai/v2/qianfan/custom-model") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("custom:https://gateway.example.com/proxy/v1/openai/v2", split.provider.?);
     try std.testing.expectEqualStrings("qianfan/custom-model", split.model);
 }
 

@@ -288,10 +288,8 @@ fn isConfiguredProviderName(self: anytype, provider_name: []const u8) bool {
 }
 
 fn hasExplicitProviderPrefix(self: anytype, model: []const u8) bool {
-    const slash = std.mem.indexOfScalar(u8, model, '/') orelse return false;
-    if (slash == 0 or slash + 1 >= model.len) return false;
-
-    const provider_candidate = model[0..slash];
+    const split = model_refs.splitProviderModel(model) orelse return false;
+    const provider_candidate = split.provider orelse return false;
     if (providers.classifyProvider(provider_candidate) != .unknown) return true;
 
     var lower_buf: [128]u8 = undefined;
@@ -422,6 +420,23 @@ test "configPrimaryModelForSelection keeps explicit configured custom provider p
     const primary = try configPrimaryModelForSelection(&dummy, "customgw/model-a");
     defer allocator.free(primary);
     try std.testing.expectEqualStrings("customgw/model-a", primary);
+}
+
+test "configPrimaryModelForSelection keeps explicit custom url provider ref" {
+    const allocator = std.testing.allocator;
+    var dummy = struct {
+        allocator: std.mem.Allocator,
+        default_provider: []const u8,
+        configured_providers: []const config_types.ProviderEntry,
+    }{
+        .allocator = allocator,
+        .default_provider = "openrouter",
+        .configured_providers = &.{},
+    };
+
+    const primary = try configPrimaryModelForSelection(&dummy, "custom:https://gateway.example.com/proxy/v1/openai/v2/qianfan/custom-model");
+    defer allocator.free(primary);
+    try std.testing.expectEqualStrings("custom:https://gateway.example.com/proxy/v1/openai/v2/qianfan/custom-model", primary);
 }
 
 test "bareSessionResetPrompt returns prompt for bare /new" {
