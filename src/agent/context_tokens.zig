@@ -240,6 +240,13 @@ test "lookupContextTokens handles custom url refs with nested provider budgets" 
     );
 }
 
+test "lookupContextTokens handles versionless custom url refs with nested provider budgets" {
+    try std.testing.expectEqual(
+        @as(?u64, 98_304),
+        lookupContextTokens("custom:https://gateway.example.com/qianfan/custom-model"),
+    );
+}
+
 test "lookupContextTokens honors canonical provider aliases" {
     try std.testing.expectEqual(@as(?u64, 262_144), lookupContextTokens("mimo/custom-model"));
     try std.testing.expectEqual(@as(?u64, 262_144), lookupContextTokens("xiaomi-mimo"));

@@ -1,4 +1,5 @@
 const std = @import("std");
+const provider_names = @import("provider_names.zig");
 
 pub const ProviderModelRef = struct {
     provider: ?[]const u8,
@@ -13,10 +14,65 @@ fn splitAtSlash(model_ref: []const u8, slash_idx: usize) ?ProviderModelRef {
     };
 }
 
+fn matchExplicitProviderPrefix(model_ref: []const u8, provider_name: []const u8) ?ProviderModelRef {
+    if (!std.mem.startsWith(u8, model_ref, provider_name)) return null;
+    if (model_ref.len <= provider_name.len + 1) return null;
+    if (model_ref[provider_name.len] != '/') return null;
+    return .{
+        .provider = provider_name,
+        .model = model_ref[provider_name.len + 1 ..],
+    };
+}
+
 const preserved_url_provider_suffixes = [_][]const u8{
     "/chat/completions/",
     "/responses/",
 };
+
+const known_url_model_provider_namespaces = std.StaticStringMap(void).initComptime(.{
+    .{ "openai", {} },
+    .{ "anthropic", {} },
+    .{ "openrouter", {} },
+    .{ "groq", {} },
+    .{ "mistral", {} },
+    .{ "deepseek", {} },
+    .{ "xai", {} },
+    .{ "gemini", {} },
+    .{ "vertex", {} },
+    .{ "ollama", {} },
+    .{ "qwen", {} },
+    .{ "dashscope", {} },
+    .{ "qianfan", {} },
+    .{ "baidu", {} },
+    .{ "doubao", {} },
+    .{ "volcengine", {} },
+    .{ "ark", {} },
+    .{ "moonshot", {} },
+    .{ "kimi", {} },
+    .{ "minimax", {} },
+    .{ "glm", {} },
+    .{ "zhipu", {} },
+    .{ "hunyuan", {} },
+    .{ "tencent", {} },
+    .{ "baichuan", {} },
+    .{ "siliconflow", {} },
+    .{ "aihubmix", {} },
+    .{ "huggingface", {} },
+    .{ "fireworks", {} },
+    .{ "perplexity", {} },
+    .{ "cohere", {} },
+    .{ "telnyx", {} },
+    .{ "cerebras", {} },
+    .{ "together-ai", {} },
+    .{ "venice", {} },
+    .{ "vercel-ai", {} },
+    .{ "poe", {} },
+    .{ "xiaomi", {} },
+});
+
+fn isKnownProviderNamespace(segment: []const u8) bool {
+    return known_url_model_provider_namespaces.has(provider_names.canonicalProviderNameIgnoreCase(segment));
+}
 
 fn splitKnownEndpointUrlProviderModel(model_ref: []const u8, url_start: usize) ?ProviderModelRef {
     var best_split: ?ProviderModelRef = null;
@@ -55,6 +111,23 @@ fn splitVersionedUrlProviderModel(model_ref: []const u8, url_start: usize) ?Prov
     return last_split;
 }
 
+fn splitKnownProviderNamespaceUrlModel(model_ref: []const u8, url_start: usize) ?ProviderModelRef {
+    var i: usize = url_start;
+    while (i < model_ref.len) : (i += 1) {
+        if (model_ref[i] != '/') continue;
+        if (i + 1 >= model_ref.len) return null;
+
+        const tail = model_ref[i + 1 ..];
+        const next_sep = std.mem.indexOfScalar(u8, tail, '/') orelse continue;
+        const provider_segment = tail[0..next_sep];
+        if (provider_segment.len == 0) continue;
+        if (!isKnownProviderNamespace(provider_segment)) continue;
+
+        return splitAtSlash(model_ref, i);
+    }
+    return null;
+}
+
 fn splitLastUrlPathSegment(model_ref: []const u8, url_start: usize) ?ProviderModelRef {
     var i = model_ref.len;
     while (i > url_start) : (i -= 1) {
@@ -65,12 +138,29 @@ fn splitLastUrlPathSegment(model_ref: []const u8, url_start: usize) ?ProviderMod
     return null;
 }
 
+pub fn splitProviderModelWithKnownProviders(model_ref: []const u8, known_provider_names: []const []const u8) ?ProviderModelRef {
+    var best_split: ?ProviderModelRef = null;
+    var best_provider_len: usize = 0;
+
+    for (known_provider_names) |provider_name| {
+        const split = matchExplicitProviderPrefix(model_ref, provider_name) orelse continue;
+        const provider_len = split.provider.?.len;
+        if (provider_len > best_provider_len) {
+            best_provider_len = provider_len;
+            best_split = split;
+        }
+    }
+
+    return best_split;
+}
+
 pub fn splitProviderModel(model_ref: []const u8) ?ProviderModelRef {
     if (model_ref.len == 0) return null;
     if (std.mem.indexOf(u8, model_ref, "://")) |proto_start| {
         const url_start = proto_start + 3;
         if (splitKnownEndpointUrlProviderModel(model_ref, url_start)) |split| return split;
         if (splitVersionedUrlProviderModel(model_ref, url_start)) |split| return split;
+        if (splitKnownProviderNamespaceUrlModel(model_ref, url_start)) |split| return split;
         return splitLastUrlPathSegment(model_ref, url_start);
     }
 
@@ -102,6 +192,18 @@ test "splitProviderModel handles versionless custom url refs" {
     try std.testing.expectEqualStrings("gpt-4o", split.model);
 }
 
+test "splitProviderModel keeps namespaced models on versionless custom urls" {
+    const split = splitProviderModel("custom:https://gateway.example.com/qianfan/custom-model") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("custom:https://gateway.example.com", split.provider.?);
+    try std.testing.expectEqualStrings("qianfan/custom-model", split.model);
+}
+
+test "splitProviderModel keeps namespaced models after versionless base path" {
+    const split = splitProviderModel("custom:https://gateway.example.com/api/qianfan/custom-model") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("custom:https://gateway.example.com/api", split.provider.?);
+    try std.testing.expectEqualStrings("qianfan/custom-model", split.model);
+}
+
 test "splitProviderModel preserves explicit responses endpoint suffix" {
     const split = splitProviderModel("custom:https://my-api.example.com/api/v2/responses/my-model") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("custom:https://my-api.example.com/api/v2/responses", split.provider.?);
@@ -112,6 +214,19 @@ test "splitProviderModel handles versionless anthropic custom refs" {
     const split = splitProviderModel("anthropic-custom:https://my-api.example.com/claude-sonnet-4") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("anthropic-custom:https://my-api.example.com", split.provider.?);
     try std.testing.expectEqualStrings("claude-sonnet-4", split.model);
+}
+
+test "splitProviderModelWithKnownProviders prefers longest configured prefix" {
+    const configured_provider_names = [_][]const u8{
+        "custom:https://gateway.example.com",
+        "custom:https://gateway.example.com/api",
+    };
+    const split = splitProviderModelWithKnownProviders(
+        "custom:https://gateway.example.com/api/qianfan/custom-model",
+        &configured_provider_names,
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("custom:https://gateway.example.com/api", split.provider.?);
+    try std.testing.expectEqualStrings("qianfan/custom-model", split.model);
 }
 
 test "splitProviderModel rejects empty model tail" {

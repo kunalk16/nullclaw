@@ -81,6 +81,39 @@ fn splitPrimaryModelRef(primary: []const u8) ?PrimaryModelRef {
     };
 }
 
+fn splitPrimaryModelRefWithProviders(primary: []const u8, provider_names: []const []const u8) ?PrimaryModelRef {
+    if (model_refs.splitProviderModelWithKnownProviders(primary, provider_names)) |split| {
+        return .{
+            .provider = split.provider orelse return null,
+            .model = split.model,
+        };
+    }
+    return splitPrimaryModelRef(primary);
+}
+
+fn collectConfiguredProviderNames(
+    allocator: std.mem.Allocator,
+    root: std.json.ObjectMap,
+) ![]const []const u8 {
+    if (root.get("models")) |models| {
+        if (models == .object) {
+            if (models.object.get("providers")) |providers_value| {
+                if (providers_value == .object) {
+                    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+                    errdefer names.deinit(allocator);
+
+                    var it = providers_value.object.iterator();
+                    while (it.next()) |entry| {
+                        try names.append(allocator, entry.key_ptr.*);
+                    }
+                    return if (names.items.len == 0) &.{} else try names.toOwnedSlice(allocator);
+                }
+            }
+        }
+    }
+    return &.{};
+}
+
 fn parseDiagnosticsOtelHeaders(
     allocator: std.mem.Allocator,
     value: std.json.Value,
@@ -118,6 +151,7 @@ fn parseDiagnosticsOtelHeaders(
 fn parseNamedAgentObject(
     allocator: std.mem.Allocator,
     config_path: []const u8,
+    configured_provider_names: []const []const u8,
     agent_name: []const u8,
     item: std.json.Value,
 ) !?types.NamedAgentConfig {
@@ -148,7 +182,7 @@ fn parseNamedAgentObject(
         }
 
         if (m == .string) {
-            if (splitPrimaryModelRef(m.string)) |parsed_ref| {
+            if (splitPrimaryModelRefWithProviders(m.string, configured_provider_names)) |parsed_ref| {
                 break :blk parsed_ref;
             }
             break :blk null;
@@ -156,7 +190,7 @@ fn parseNamedAgentObject(
         if (m == .object) {
             if (m.object.get("primary")) |mp| {
                 if (mp == .string) {
-                    if (splitPrimaryModelRef(mp.string)) |parsed_ref| {
+                    if (splitPrimaryModelRefWithProviders(mp.string, configured_provider_names)) |parsed_ref| {
                         break :blk parsed_ref;
                     }
                 }
@@ -640,6 +674,8 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
     defer parsed.deinit();
 
     const root = parsed.value.object;
+    const configured_provider_names = try collectConfiguredProviderNames(self.allocator, root);
+    defer if (configured_provider_names.len > 0) self.allocator.free(configured_provider_names);
 
     // Top-level fields
     if (root.get("workspace")) |v| {
@@ -747,7 +783,7 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                                 if (v == .string) {
                                     // Always try to parse primary field - it may contain full provider/model info
                                     // or just the model part (when legacy default_provider exists)
-                                    if (splitPrimaryModelRef(v.string)) |parsed_ref| {
+                                    if (splitPrimaryModelRefWithProviders(v.string, configured_provider_names)) |parsed_ref| {
                                         self.default_model = try self.allocator.dupe(u8, parsed_ref.model);
                                         // Only update provider if not already set from legacy field
                                         if (!self.legacy_default_provider_detected) {
@@ -810,7 +846,13 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                         if (item == .object) {
                             const name_val = item.object.get("id") orelse item.object.get("name") orelse continue;
                             if (name_val != .string) continue;
-                            var agent_cfg = try parseNamedAgentObject(self.allocator, self.config_path, name_val.string, item) orelse continue;
+                            var agent_cfg = try parseNamedAgentObject(
+                                self.allocator,
+                                self.config_path,
+                                configured_provider_names,
+                                name_val.string,
+                                item,
+                            ) orelse continue;
                             errdefer freeNamedAgentConfig(self.allocator, &agent_cfg);
                             try list.append(self.allocator, agent_cfg);
                         }
@@ -831,7 +873,13 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                 while (it.next()) |entry| {
                     const key = entry.key_ptr.*;
                     if (std.mem.eql(u8, key, "defaults") or std.mem.eql(u8, key, "list")) continue;
-                    var agent_cfg = try parseNamedAgentObject(self.allocator, self.config_path, key, entry.value_ptr.*) orelse continue;
+                    var agent_cfg = try parseNamedAgentObject(
+                        self.allocator,
+                        self.config_path,
+                        configured_provider_names,
+                        key,
+                        entry.value_ptr.*,
+                    ) orelse continue;
                     errdefer freeNamedAgentConfig(self.allocator, &agent_cfg);
                     try named_agent_list.append(self.allocator, agent_cfg);
                 }
@@ -2394,4 +2442,37 @@ test "parseAgentBindingsArray normalizes legacy #topic: peer IDs" {
     try std.testing.expect(bindings[0].match.peer != null);
     // The legacy #topic:4 format must be normalized to :thread:4
     try std.testing.expectEqualStrings("-1009999999999:thread:4", bindings[0].match.peer.?.id);
+}
+
+test "parseJson keeps configured versionless custom url namespaces in defaults" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var cfg = Config{
+        .workspace_dir = "/tmp",
+        .config_path = "/tmp/config.json",
+        .allocator = allocator,
+    };
+
+    const json =
+        \\{
+        \\  "models": {
+        \\    "providers": {
+        \\      "custom:https://gateway.example.com": {}
+        \\    }
+        \\  },
+        \\  "agents": {
+        \\    "defaults": {
+        \\      "model": {
+        \\        "primary": "custom:https://gateway.example.com/qianfan/custom-model"
+        \\      }
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    try cfg.parseJson(json);
+    try std.testing.expectEqualStrings("custom:https://gateway.example.com", cfg.default_provider);
+    try std.testing.expect(cfg.default_model != null);
+    try std.testing.expectEqualStrings("qianfan/custom-model", cfg.default_model.?);
 }

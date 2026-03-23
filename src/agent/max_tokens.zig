@@ -226,6 +226,13 @@ test "lookupModelMaxTokens handles custom url refs with nested provider budgets"
     );
 }
 
+test "lookupModelMaxTokens handles versionless custom url refs with nested provider budgets" {
+    try std.testing.expectEqual(
+        @as(?u32, 32_768),
+        lookupModelMaxTokens("custom:https://gateway.example.com/qianfan/custom-model"),
+    );
+}
+
 test "lookupModelMaxTokens keeps legacy and turbo gpt-4 variants distinct" {
     try std.testing.expectEqual(@as(?u32, 4_096), lookupModelMaxTokens("openai/gpt-4-0613"));
     try std.testing.expectEqual(@as(?u32, 8192), lookupModelMaxTokens("openai/gpt-4-turbo-preview"));
