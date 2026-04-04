@@ -224,7 +224,6 @@ pub const ShellTool = struct {
         // explicitly invokes PowerShell so pipes stay inside PowerShell instead
         // of being interpreted by cmd.exe first.
         const proc = @import("process_util.zig");
-
         // Determine base argv and ownership
         var base_argv: []const []const u8 = undefined;
         var maybe_owned_argv: ?[]const []const u8 = null;
@@ -261,6 +260,7 @@ pub const ShellTool = struct {
             .cwd = effective_cwd,
             .env_map = &env,
             .max_output_bytes = self.max_output_bytes,
+            .timeout_ns = self.timeout_ns,
         });
         defer allocator.free(result.stderr);
 
@@ -272,6 +272,10 @@ pub const ShellTool = struct {
         defer allocator.free(result.stdout);
         if (result.interrupted) {
             return ToolResult{ .success = false, .output = "", .error_msg = "Interrupted by /stop" };
+        }
+        if (result.timed_out) {
+            const msg = try std.fmt.allocPrint(allocator, "Command timed out after {d}s", .{self.timeout_ns / std.time.ns_per_s});
+            return ToolResult{ .success = false, .output = "", .error_msg = msg };
         }
         if (result.exit_code != null) {
             const err_out = try allocator.dupe(u8, if (result.stderr.len > 0) result.stderr else "Command failed with non-zero exit code");
@@ -418,6 +422,23 @@ test "shell reports interruption when cancel flag is set" {
     try std.testing.expect(!result.success);
     try std.testing.expect(result.error_msg != null);
     try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "Interrupted") != null);
+}
+
+test "shell reports timeout for long-running command" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+
+    var st = ShellTool{ .workspace_dir = ".", .timeout_ns = 100 * std.time.ns_per_ms };
+    const t = st.tool();
+    const parsed = try root.parseTestArgs("{\"command\": \"sleep 5\"}");
+    defer parsed.deinit();
+
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    defer if (result.output.len > 0) std.testing.allocator.free(result.output);
+    defer if (result.error_msg) |e| std.testing.allocator.free(e);
+
+    try std.testing.expect(!result.success);
+    try std.testing.expect(result.error_msg != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "timed out") != null);
 }
 
 test "shell missing command param" {
