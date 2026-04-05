@@ -1205,7 +1205,7 @@ pub const SessionManager = struct {
             .bootstrap_provider = bootstrap_provider,
             .backend_name = self.config.memory.backend,
             .sandbox_backend = self.config.security.sandbox.backend,
-            .sandbox_enabled = self.config.security.sandbox.enabled orelse true,
+            .sandbox_enabled = self.config.sandboxEnabled(),
         }) catch &.{};
         errdefer if (runtime_tools.len > 0) tools_mod.deinitTools(self.allocator, runtime_tools);
 

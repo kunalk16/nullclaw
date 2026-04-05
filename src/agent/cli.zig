@@ -443,7 +443,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         .bootstrap_provider = bootstrap_provider,
         .backend_name = cfg.memory.backend,
         .sandbox_backend = cfg.security.sandbox.backend,
-        .sandbox_enabled = cfg.security.sandbox.enabled orelse true,
+        .sandbox_enabled = cfg.sandboxEnabled(),
     });
     defer tools_mod.deinitTools(allocator, tools);
 

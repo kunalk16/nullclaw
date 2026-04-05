@@ -5,6 +5,7 @@
 //! scheduling, delegation, browser, and image tools.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const memory_mod = @import("../memory/root.zig");
 const Memory = memory_mod.Memory;
 const bootstrap_mod = @import("../bootstrap/root.zig");
@@ -351,7 +352,9 @@ pub fn allTools(
         .path_env_vars = tc.path_env_vars,
         // sandbox and sandbox_storage initialized below if enabled
     };
-    if (opts.sandbox_enabled) {
+    if (opts.sandbox_enabled and comptime builtin.os.tag != .windows) {
+        // Windows shells use cmd.exe/PowerShell, which Unix-oriented sandboxes
+        // cannot wrap without breaking command execution semantics.
         st.sandbox = createSandbox(
             allocator,
             mapConfigSandboxBackend(opts.sandbox_backend),
@@ -866,6 +869,43 @@ test "all tools excludes extras when disabled" {
     try std.testing.expectEqual(@as(usize, 16), tools.len);
 }
 
+test "all tools wires shell sandbox by default" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const tools = try allTools(std.testing.allocator, "/tmp/yc_test", .{});
+    defer deinitTools(std.testing.allocator, tools);
+
+    var saw_shell = false;
+    for (tools) |t| {
+        if (!std.mem.eql(u8, t.name(), "shell")) continue;
+        const st: *shell.ShellTool = @ptrCast(@alignCast(t.ptr));
+        try std.testing.expect(st.sandbox != null);
+        saw_shell = true;
+        break;
+    }
+
+    try std.testing.expect(saw_shell);
+}
+
+test "all tools skips shell sandbox wiring on windows" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const tools = try allTools(std.testing.allocator, "C:\\tmp\\yc_test", .{
+        .sandbox_enabled = true,
+        .sandbox_backend = .docker,
+    });
+    defer deinitTools(std.testing.allocator, tools);
+
+    for (tools) |t| {
+        if (!std.mem.eql(u8, t.name(), "shell")) continue;
+        const st: *shell.ShellTool = @ptrCast(@alignCast(t.ptr));
+        try std.testing.expect(st.sandbox == null);
+        return;
+    }
+
+    return error.TestUnexpectedResult;
+}
+
 test "all tools wires http and web_search config into tool instances" {
     const domains = [_][]const u8{ "example.com", "api.example.com" };
     const search_url = "https://searx.example.com";
@@ -1076,15 +1116,23 @@ test "subagent tools wire bootstrap provider into file_read for sqlite backends"
     try std.testing.expect(checked);
 }
 
-test "config sandbox backend mapping preserves explicit values" {
-    // Regression: config_types.SandboxBackend and security.detect.SandboxBackend
-    // do not share the same enum ordering.
-    try std.testing.expect(mapConfigSandboxBackend(.auto) == .auto);
-    try std.testing.expect(mapConfigSandboxBackend(.landlock) == .landlock);
-    try std.testing.expect(mapConfigSandboxBackend(.firejail) == .firejail);
-    try std.testing.expect(mapConfigSandboxBackend(.bubblewrap) == .bubblewrap);
-    try std.testing.expect(mapConfigSandboxBackend(.docker) == .docker);
-    try std.testing.expect(mapConfigSandboxBackend(.none) == .none);
+test "mapConfigSandboxBackend preserves configured backend values" {
+    // Regression: config and runtime sandbox enums do not share the same ordinal order.
+    const cases = [_]struct {
+        config: ConfigSandboxBackend,
+        runtime: SandboxBackend,
+    }{
+        .{ .config = .auto, .runtime = .auto },
+        .{ .config = .landlock, .runtime = .landlock },
+        .{ .config = .firejail, .runtime = .firejail },
+        .{ .config = .bubblewrap, .runtime = .bubblewrap },
+        .{ .config = .docker, .runtime = .docker },
+        .{ .config = .none, .runtime = .none },
+    };
+
+    for (cases) |case| {
+        try std.testing.expectEqual(case.runtime, mapConfigSandboxBackend(case.config));
+    }
 }
 
 test "subagent tools wire http allowlist, response limit, and timeout" {

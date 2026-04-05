@@ -2750,7 +2750,6 @@ fn runSignalChannel(allocator: std.mem.Allocator, args: []const []const u8, conf
         std.process.exit(1);
     };
     defer runtime.deinit();
-
     var loop_state = yc.channel_loop.SignalLoopState.init();
     yc.channel_loop.runSignalLoop(allocator, config, runtime, &loop_state, &sg);
 }
@@ -2927,7 +2926,6 @@ fn runTelegramChannel(allocator: std.mem.Allocator, args: []const []const u8, co
         std.process.exit(1);
     };
     defer runtime.deinit();
-
     std.debug.print("  Tools: {d} loaded\n", .{runtime.tools.len});
     std.debug.print("  Memory: {s}\n", .{if (runtime.mem_rt != null) "enabled" else "disabled"});
     std.debug.print("  Polling for messages... (Ctrl+C to stop)\n\n", .{});

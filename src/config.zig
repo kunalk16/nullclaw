@@ -218,6 +218,11 @@ pub const Config = struct {
         return self.getProviderKey(self.default_provider);
     }
 
+    /// Sandbox defaults to enabled when the config leaves it unset.
+    pub fn sandboxEnabled(self: *const Config) bool {
+        return self.security.sandbox.enabled orelse true;
+    }
+
     fn sanitizeStatePathSegment(allocator: std.mem.Allocator, raw: []const u8) ![]const u8 {
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         errdefer buf.deinit(allocator);
@@ -5154,6 +5159,22 @@ test "defaultProviderKey stays null when provider entry omits api key" {
     var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
     try cfg.parseJson(json);
     try std.testing.expect(cfg.defaultProviderKey() == null);
+}
+
+test "sandboxEnabled defaults to true and honors explicit override" {
+    var cfg = Config{
+        .workspace_dir = "/tmp/yc",
+        .config_path = "/tmp/yc/config.json",
+        .allocator = std.testing.allocator,
+    };
+
+    try std.testing.expect(cfg.sandboxEnabled());
+
+    cfg.security.sandbox.enabled = false;
+    try std.testing.expect(!cfg.sandboxEnabled());
+
+    cfg.security.sandbox.enabled = true;
+    try std.testing.expect(cfg.sandboxEnabled());
 }
 
 test "tools.media.audio with language only parses correctly" {
